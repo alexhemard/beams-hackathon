@@ -1,0 +1,34 @@
+{
+  "name": "beams-hackathon",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Change requests as an agent's only tools: Access Request -> per-CR bot in a beam -> bespoke MCP server -> execution.",
+  "bin": {
+    "oncall": "./cli/oncall.ts"
+  },
+  "scripts": {
+    "oncall": "tsx cli/oncall.ts",
+    "cr-exec": "tsx cr-exec/server.ts",
+    "typecheck": "tsc --noEmit",
+    "bundle:cr-exec": "esbuild cr-exec/server.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/cr-exec.mjs --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\"",
+    "bundle:investigate": "esbuild investigator/agent.ts --bundle --loader:.md=text --platform=node --target=node22 --format=esm --outfile=dist/investigate.mjs --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\""
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "^0.87.1",
+    "@earendil-works/pi-ai": "^0.87.1",
+    "@earendil-works/pi-tui": "^0.87.1",
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "jose": "^6.1.0",
+    "shell-quote": "^1.8.3",
+    "yaml": "^2.8.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "@types/shell-quote": "^1.7.5",
+    "esbuild": "^0.25.10",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.2"
+  }
+}

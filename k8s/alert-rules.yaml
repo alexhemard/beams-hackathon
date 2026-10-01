@@ -1,0 +1,25 @@
+# Demo alert that fires fast. The stock kube-prometheus-stack rules
+# (KubePodCrashLooping, KubeDeploymentReplicasMismatch) use `for: 15m`, too slow for a
+# demo. `release: monitoring` matches the Prometheus ruleSelector installed by demo/up.sh.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: oncall-demo
+  namespace: monitoring
+  labels:
+    release: monitoring
+spec:
+  groups:
+    - name: oncall-demo
+      rules:
+        - alert: EmailpalsApiUnavailable
+          expr: kube_deployment_status_replicas_available{namespace="emailpals", deployment="emailpals-api"} == 0
+          for: 15s
+          labels:
+            severity: critical
+            namespace: emailpals
+            deployment: emailpals-api
+          annotations:
+            summary: "emailpals-api has no available replicas"
+            description: "Deployment emailpals/emailpals-api has had 0 available replicas for more than 15 seconds."
+            runbook: KubePodCrashLooping

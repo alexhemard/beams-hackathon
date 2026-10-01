@@ -1,0 +1,14 @@
+# Local smoke test for the failure path: second step's verify fails, so both
+# steps roll back in reverse order.
+kind: change-request
+summary: dev smoke test, failure and rollback
+risk: low
+steps:
+  - name: first
+    run: echo running first
+    rollback: echo rolling back first
+    verify: "true"
+  - name: second
+    run: echo running second
+    rollback: echo rolling back second
+    verify: "false"

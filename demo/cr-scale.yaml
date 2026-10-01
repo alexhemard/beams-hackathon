@@ -1,0 +1,8 @@
+kind: change-request
+summary: scale emailpals-api to 3 replicas and confirm rollout
+risk: low
+steps:
+  - name: scale-up
+    run: kubectl -n emailpals scale deploy/emailpals-api --replicas=3
+    rollback: kubectl -n emailpals scale deploy/emailpals-api --replicas=1
+    verify: kubectl -n emailpals rollout status deploy/emailpals-api --timeout=90s

@@ -1,0 +1,13 @@
+# Local smoke test for the executor state machine. Uses only `true`/`false`/`echo`.
+kind: change-request
+summary: dev smoke test, happy path
+risk: low
+steps:
+  - name: first
+    run: echo running first
+    rollback: echo rolling back first
+    verify: "true"
+  - name: second
+    run: echo running second
+    rollback: echo rolling back second
+    verify: "true"

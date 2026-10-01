@@ -1,0 +1,7 @@
+# Copy to ~/.oncallrc. All keys optional.
+editor: nvim                      # e on a drafted change request opens it here ($VISUAL / $EDITOR / vi otherwise)
+attach: tab                       # A / Enter on an investigation: tab (Ghostty, AppleScript) | window | terminal (Terminal.app) | print
+proxy: flat-pine.beams.sh:443
+kube_cluster: oncall
+refresh_every: 20                 # seconds; 0 disables the TUI's automatic refresh
+target: kube

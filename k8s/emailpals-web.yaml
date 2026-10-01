@@ -1,0 +1,67 @@
+# emailpals-web: the E-mail Pals site (https://github.com/alexhemard/email-pals), served by nginx.
+# Content comes from ConfigMaps built out of k8s/emailpals-web/site by demo/up.sh:
+#   emailpals-web-root   index.html
+#   emailpals-web-css    css/
+#   emailpals-web-images images/
+#   emailpals-web-nginx  nginx.conf (default.conf: static site + /api/ → emailpals-api)
+# The page polls /api/ and shows "emailpals: online" or the SYSTEM IS DOWN banner.
+# Also gives emailpals-api a Service so the web tier has something to call.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: emailpals-web
+  namespace: emailpals
+  labels: { app: emailpals-web, tier: web }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: emailpals-web }
+  template:
+    metadata:
+      labels: { app: emailpals-web, tier: web }
+    spec:
+      containers:
+        - name: emailpals-web
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet: { path: /, port: 80 }
+            periodSeconds: 2
+          volumeMounts:
+            - { name: root, mountPath: /usr/share/nginx/html }
+            - { name: css, mountPath: /usr/share/nginx/html/css }
+            - { name: images, mountPath: /usr/share/nginx/html/images }
+            - { name: nginx, mountPath: /etc/nginx/conf.d }
+      volumes:
+        - name: nginx
+          configMap: { name: emailpals-web-nginx }
+        - name: root
+          configMap: { name: emailpals-web-root }
+        - name: css
+          configMap: { name: emailpals-web-css }
+        - name: images
+          configMap: { name: emailpals-web-images }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: emailpals-web
+  namespace: emailpals
+  labels: { app: emailpals-web }
+spec:
+  selector: { app: emailpals-web }
+  ports:
+    - { name: http, port: 80, targetPort: 80 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: emailpals-api
+  namespace: emailpals
+  labels: { app: emailpals-api }
+spec:
+  selector: { app: emailpals-api }
+  ports:
+    - { name: http, port: 80, targetPort: 80 }

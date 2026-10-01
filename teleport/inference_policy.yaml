@@ -1,0 +1,12 @@
+# Summarize recorded SSH sessions with the tenant's default inference model (Teleport session
+# summaries). The TUI keeps an interactive `tsh beams ssh` attached to each investigator's tmux for
+# the whole investigation, so the investigation becomes a recorded, summarized session.
+kind: inference_policy
+version: v1
+metadata:
+  name: oncall-ssh-summaries
+  labels:
+    beams-hackathon: cr
+spec:
+  kinds: ["ssh"]
+  model: teleport-cloud-default

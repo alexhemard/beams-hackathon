@@ -1,0 +1,69 @@
+# Kubernetes side of the Teleport roles. Teleport maps a Teleport role to
+# Kubernetes groups (kubernetes_groups); these bindings decide what those groups
+# may do.
+#
+#   oncall-view  read-only: investigator bot, on-call operator (TUI)
+#   oncall-fix   write in namespace emailpals: executor bot (cr-exec)
+---
+# Read-only, cluster-wide, plus the API server's service proxy so Alertmanager
+# can be read with `kubectl get --raw .../services/alertmanager-operated:9093/proxy/...`.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: oncall-view-extra
+rules:
+  - apiGroups: [""]
+    resources: ["services/proxy"]
+    verbs: ["get", "create", "delete"] # get: read alerts; create/delete: post and expire silences
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: oncall-view
+subjects:
+  - kind: Group
+    name: oncall-view
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: view
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: oncall-view-extra
+subjects:
+  - kind: Group
+    name: oncall-view
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: oncall-view-extra
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: oncall-fix
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale", "replicasets"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["pods", "events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: oncall-fix
+  namespace: emailpals
+subjects:
+  - kind: Group
+    name: oncall-fix
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: oncall-fix
+  apiGroup: rbac.authorization.k8s.io

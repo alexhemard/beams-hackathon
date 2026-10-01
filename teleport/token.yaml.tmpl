@@ -1,0 +1,23 @@
+# Per-run join token for a bot living in a beam. Filled in by beamops.ts.
+# bound_keypair: the bot generates a keypair inside the beam and registers its
+# public key once, using the one-time registration secret. Renewals require
+# possession of that private key. recovery.limit 1 = a single re-join allowed.
+kind: token
+version: v2
+metadata:
+  name: ${TOKEN_NAME}
+  expires: "${EXPIRES}"
+  labels:
+    beams-hackathon: cr
+    oncall/role: "${ROLE}"
+    oncall/beam-alias: "${BEAM_ALIAS}"
+    oncall/ref: "${REF}"
+spec:
+  bot_name: ${BOT_NAME}
+  join_method: bound_keypair
+  roles: [Bot]
+  bound_keypair:
+    onboarding:
+      registration_secret: "${SECRET}"
+    recovery:
+      limit: 1

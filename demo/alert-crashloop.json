@@ -1,0 +1,16 @@
+{
+  "labels": {
+    "alertname": "KubePodCrashLooping",
+    "namespace": "emailpals",
+    "pod": "emailpals-api-5d8f7c9b6-x2k9p",
+    "container": "emailpals-api",
+    "severity": "warning",
+    "cluster": "oncall"
+  },
+  "annotations": {
+    "description": "Pod emailpals/emailpals-api-5d8f7c9b6-x2k9p (emailpals-api) is in waiting state (reason: \"ImagePullBackOff\").",
+    "summary": "Pod is crash looping."
+  },
+  "startsAt": "2026-09-26T12:00:00Z",
+  "status": { "state": "active" }
+}

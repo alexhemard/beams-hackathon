@@ -1,0 +1,18 @@
+# Per-run bot for an investigation or executor beam. Filled in by beamops.ts.
+# Labels are the tracking record: which beam this identity lives in, which change
+# request or alert it serves, who owns it. Recoverable with `tctl get bots`.
+kind: bot
+version: v1
+metadata:
+  name: ${BOT_NAME}
+  labels:
+    beams-hackathon: cr
+    oncall/role: "${ROLE}"
+    oncall/owner: "${OWNER}"
+    oncall/beam-alias: "${BEAM_ALIAS}"
+    oncall/beam-id: "${BEAM_ID}"
+    oncall/ref: "${REF}"
+    oncall/parent-beam: "${PARENT}"
+spec:
+  roles: [${TELEPORT_ROLE}]
+  max_session_ttl: 7200s # protobuf Duration syntax

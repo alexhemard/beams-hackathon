@@ -1,0 +1,10 @@
+# Failure path: the image tag does not exist, so the rollout never completes and
+# verify times out -> FAILED -> rollback tools appear -> ROLLED_BACK.
+kind: change-request
+summary: bump emailpals-api image (deliberately broken tag) to exercise rollback
+risk: medium
+steps:
+  - name: bump-image
+    run: kubectl -n emailpals set image deploy/emailpals-api emailpals-api=nginx:does-not-exist
+    rollback: kubectl -n emailpals rollout undo deploy/emailpals-api
+    verify: kubectl -n emailpals rollout status deploy/emailpals-api --timeout=45s

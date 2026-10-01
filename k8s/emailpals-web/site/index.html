@@ -1,0 +1,93 @@
+<html>
+  <head>
+    <title>E-mail Pals: Faster than pen pals!</title>
+    <link rel="stylesheet" href="css/emailpals.css" type="text/css" media="screen" />
+  </head>
+  <body>
+    <!-- system status: polls the API tier through /api/ (nginx proxies to emailpals-api) -->
+    <div id="status">
+      <table id="status-online" width="400" border="1" cellpadding="4" bgcolor="#ccffcc" style="display:none">
+        <tr><td><b><tt>emailpals: online</tt></b> <font size="1">(system status checked <span id="status-time">-</span>)</font></td></tr>
+      </table>
+      <div id="status-down" style="display:none">
+        <center>
+          <img src="images/underconstruction.gif" alt="under construction" />
+          <div class="downbanner">EMAIL PALS SYSTEM IS DOWN - PLEASE CONTACT WEBMASTER <a href="mailto:webmaster@emailpals.org">webmaster@emailpals.org</a></div>
+        </center>
+      </div>
+    </div>
+    <script>
+      (function () {
+        var online = document.getElementById("status-online");
+        var down = document.getElementById("status-down");
+        var stamp = document.getElementById("status-time");
+        function show(ok) {
+          online.style.display = ok ? "" : "none";
+          down.style.display = ok ? "none" : "";
+          stamp.textContent = new Date().toLocaleTimeString();
+        }
+        function poll() {
+          var ctl = typeof AbortController !== "undefined" ? new AbortController() : null;
+          var timer = ctl && setTimeout(function () { ctl.abort(); }, 4000);
+          fetch("api/?t=" + Date.now(), { cache: "no-store", signal: ctl && ctl.signal })
+            .then(function (r) { show(r.ok); })
+            .catch(function () { show(false); })
+            .then(function () { if (timer) clearTimeout(timer); });
+        }
+        poll();
+        setInterval(poll, 3000);
+      })();
+    </script>
+    <h1>E-mail Pals</h1>
+    <marquee>Faster than pen pals!</marquee>
+    <img src="images/email.gif" class="cool" alt="email" />
+    <h2>Do you love pen pals but hate the hassle?</h2>
+    <p>Welcome to the new love of your life...</p>
+    <p class="emailpals">E-mail Pals </p>
+    <p class="motto"><em>"It's faster than pen pals"</em></p>
+    <img src="images/tellfriend.jpg" alt="email friend"/>
+    <h2> Here's how it works:</h2>
+    <ol>
+      <li>Use the E-mail Pals System to meet new pen or 'e-mail' pals.</li>
+      <li>Enter your email address to the E-mail Pals 'Pal Match' Form</li>
+      <li>Enter your secret E-mail Pals password into our Web Form. (also into the form). <em>Notice: you may receive special E-mail pals birthday greetings and updates from the E-mail Pals Webmaster Team</em></li>
+      <li>Meet your new E-mail Pal!</li>
+    </ol>
+    <span style="font-size: 34px">It's Just That Easy!</span>
+    <h2> Let's Get Started!</h2>
+    <form>
+      <table width="400" cellspacing="" cellpadding="" border="">
+        <th colspan="2">E-mail Pals Sign-up Form</th>
+        <tr>
+	        <td>
+	          <label for="name">E-mail Pal Name:</label>
+	        </td>
+	        <td>
+	          <input type="text" name="email" />
+	        </td>
+        </tr>
+        <tr>
+	        <td>
+	          <label for="email">E-mail Pal e-mail address:</label>
+	        </td>
+	        <td>
+	          <input type="text" name="email" />
+	        </td>
+        </tr>
+        <tr>
+	        <td>
+	          <label for="birthday">Your Birthday:</label>
+	        </td>
+	        <td>
+	          <input type="text" name="birthday" />
+	        </td>
+        </tr>
+        <tr>
+	        <td colspan="2">
+	          <input type="submit" />
+	        </td>
+        </tr>
+      </table>
+    </form>
+  </body>
+</html>
