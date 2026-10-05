@@ -6,7 +6,7 @@ version: v1
 metadata:
   name: oncall-ssh-summaries
   labels:
-    beams-hackathon: cr
+    teleport.dev/creator: alex.hemard@goteleport.com
 spec:
   kinds: ["ssh"]
   model: teleport-cloud-default

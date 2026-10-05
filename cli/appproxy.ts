@@ -2,8 +2,13 @@
 // caller's JWT on every request, so the app sees who is calling. Pooled by app name, LRU-evicted.
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { PROXY } from "./beamops";
+import { PROXY, botAppEnv } from "./beamops";
 import { freePort, portOpen } from "./ops";
+import { retryWithBackoff } from "./retry";
+
+/** Extra wall-clock budget on top of one attempt's own timeout, so `fetch()` gets a second attempt
+ *  instead of its only attempt eating the entire timeout. */
+const RETRY_BUDGET_MS = 20_000;
 
 export class AppProxy {
   private child?: ChildProcess;
@@ -18,18 +23,40 @@ export class AppProxy {
 
   private async start(): Promise<void> {
     this.port = await freePort();
-    const child = spawn("tsh", ["--proxy", PROXY, "proxy", "app", this.app, "--port", String(this.port)], { stdio: ["ignore", "pipe", "pipe"] });
-    this.child = child;
-    let err = "";
-    child.stderr!.on("data", (d) => (err += d.toString()));
-    child.on("exit", () => (this.closed = true));
+    // A freshly published app can take a moment to propagate; `tsh proxy app` fails fast with
+    // "not found" until it does, so retry that specific failure within the overall deadline.
     const deadline = Date.now() + 20_000;
-    for (;;) {
-      if (this.closed) throw new Error(`tsh proxy app ${this.app} exited: ${err.trim().split("\n").pop() ?? ""}`);
-      if (await portOpen(this.port)) return;
-      if (Date.now() > deadline) throw new Error(`tsh proxy app ${this.app} did not come up`);
-      await new Promise((r) => setTimeout(r, 250));
+    try {
+      await retryWithBackoff(() => this.attempt(deadline), deadline, (err) => !this.closed && /not found/i.test(err));
+    } catch (e) {
+      this.closed = true;
+      throw e;
     }
+  }
+
+  /** One spawn-and-wait attempt. Resolves with undefined once the local port is up, or an error message. */
+  private attempt(deadline: number): Promise<string | undefined> {
+    return new Promise((resolve) => {
+      const child = spawn("tsh", ["--proxy", PROXY, "proxy", "app", this.app, "--port", String(this.port)], { stdio: ["ignore", "pipe", "pipe"], env: botAppEnv() });
+      this.child = child;
+      let err = "";
+      let exited = false;
+      child.stderr!.on("data", (d) => (err += d.toString()));
+      child.on("exit", () => (exited = true));
+      const poll = async () => {
+        for (;;) {
+          if (this.closed) return resolve("closed");
+          if (exited) return resolve(`tsh proxy app ${this.app} exited: ${err.trim().split("\n").pop() ?? ""}`);
+          if (await portOpen(this.port)) return resolve(undefined);
+          if (Date.now() > deadline) {
+            child.kill("SIGTERM");
+            return resolve(`tsh proxy app ${this.app} did not come up`);
+          }
+          await new Promise((r) => setTimeout(r, 250));
+        }
+      };
+      poll();
+    });
   }
 
   get alive(): boolean {
@@ -39,27 +66,44 @@ export class AppProxy {
   async fetch<T = any>(path: string, init: { method?: string; body?: unknown; timeoutMs?: number } = {}): Promise<T> {
     await this.ready;
     this.used = Date.now();
-    const ctl = new AbortController();
-    const t = setTimeout(() => ctl.abort(), init.timeoutMs ?? 15_000);
-    try {
-      const res = await fetch(`http://127.0.0.1:${this.port}${path}`, {
-        method: init.method ?? "GET",
-        headers: init.body !== undefined ? { "content-type": "application/json" } : {},
-        body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
-        signal: ctl.signal,
-      });
-      const text = await res.text();
-      let data: any = undefined;
-      try {
-        data = text ? JSON.parse(text) : {};
-      } catch {
-        data = { raw: text };
-      }
-      if (!res.ok) throw new Error(`${this.app}${path}: ${res.status} ${data?.error ?? text.slice(0, 200)}`);
-      return data as T;
-    } finally {
-      clearTimeout(t);
-    }
+    const perAttempt = init.timeoutMs ?? 15_000;
+    // A freshly published app's first authenticated request can be slow (tunnel still propagating,
+    // the server's first JWT verify fetches the proxy's JWKS over the network) - give it a couple of
+    // attempts' worth of extra budget rather than making one attempt eat the whole timeout.
+    const deadline = Date.now() + perAttempt + RETRY_BUDGET_MS;
+    let result: T | undefined;
+    await retryWithBackoff(
+      async () => {
+        const ctl = new AbortController();
+        const t = setTimeout(() => ctl.abort(), perAttempt);
+        try {
+          const res = await fetch(`http://127.0.0.1:${this.port}${path}`, {
+            method: init.method ?? "GET",
+            headers: init.body !== undefined ? { "content-type": "application/json" } : {},
+            body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
+            signal: ctl.signal,
+          });
+          const text = await res.text();
+          let data: any = undefined;
+          try {
+            data = text ? JSON.parse(text) : {};
+          } catch {
+            data = { raw: text };
+          }
+          if (!res.ok) return `${this.app}${path}: ${res.status} ${data?.error ?? text.slice(0, 200)}`; // a real response, not transient
+          result = data as T;
+          return undefined;
+        } catch (e) {
+          const msg = (e as Error).name === "AbortError" ? `timed out after ${perAttempt}ms` : (e as Error).message;
+          return `${this.app}${path}: ${msg}`;
+        } finally {
+          clearTimeout(t);
+        }
+      },
+      deadline,
+      (err) => /timed out after|ECONNRESET|ECONNREFUSED|fetch failed|socket hang up/i.test(err),
+    );
+    return result as T;
   }
 
   close(): void {

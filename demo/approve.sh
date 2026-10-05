@@ -7,15 +7,15 @@
 # Teleport forbids reviewing your own Access Request, so approval must come from a
 # second identity. Two ways:
 #
-#   human   log in as the reviewer user (role oncall-reviewer) in a separate tsh home
+#   human   log in as the reviewer user (role webmaster) in a separate tsh home
 #           and review, or use the Web UI at https://<proxy>/web/requests:
-#             TELEPORT_HOME=~/.tsh-reviewer tsh login --proxy=flat-pine.beams.sh:443 --user=cr-reviewer
+#             TELEPORT_HOME=~/.tsh-reviewer tsh login --proxy=flat-pine.beams.sh:443 --user=webmaster
 #             TELEPORT_HOME=~/.tsh-reviewer tsh request review --approve <request-id>
-#           (one-time: complete the `tctl users reset cr-reviewer` link to set a password)
+#           (one-time: complete the `tctl users reset webmaster` link to set a password)
 #
 #   bot     this script. Mints a short-lived identity for the Machine ID bot
-#           `cr-reviewer-bot` (role oncall-reviewer, created by terraform) and reviews
-#           with it. Demo shortcut; the audit log shows bot-cr-reviewer-bot as reviewer.
+#           `webmaster-bot` (role webmaster, created by terraform) and reviews
+#           with it. Demo shortcut; the audit log shows bot-webmaster-bot as reviewer.
 #
 # usage: demo/approve.sh [<request-id>] [--deny] [-y|--yes]
 #        (no id: shows `tctl requests ls` and asks for one)
@@ -24,8 +24,8 @@ set -euo pipefail
 # (`read` sees CSI-u sequences) or mouse reporting (clicks print characters). Reset both; no-ops otherwise.
 [ -t 0 ] && printf '\033[<u\033[?1000l\033[?1002l\033[?1003l\033[?1006l' >/dev/tty 2>/dev/null || true
 PROXY="${CR_PROXY:-flat-pine.beams.sh:443}"
-BOT="${CR_REVIEWER_BOT:-cr-reviewer-bot}"
-DEST="${HOME}/.cr/reviewer-identity"
+BOT="${CR_REVIEWER_BOT:-webmaster-bot}"
+DEST="${HOME}/.oncall/reviewer-identity"
 ACTION="--approve"; YES=0; REQ=""
 for a in "$@"; do
   case "$a" in
@@ -61,8 +61,8 @@ if [ "$YES" != 1 ]; then
 fi
 
 # ---- reviewer identity: Machine ID bot, short-lived, minted on the spot --------------------
-# tbot: PATH, else ~/.cr/bin (downloaded once from the Teleport CDN, same tarball the beams use)
-TBOT="$(command -v tbot || true)"; TBOT="${TBOT:-$HOME/.cr/bin/tbot}"
+# tbot: PATH, else ~/.oncall/bin (downloaded once from the Teleport CDN, same tarball the beams use)
+TBOT="$(command -v tbot || true)"; TBOT="${TBOT:-$HOME/.oncall/bin/tbot}"
 if [ ! -x "$TBOT" ]; then
   VER="${CR_TELEPORT_VERSION:-18.11.1}"; ARCH="$(uname -m)"; [ "$ARCH" = "x86_64" ] && ARCH=amd64; [ "$ARCH" = "arm64" ] && ARCH=arm64
   OS="$(uname -s | tr '[:upper:]' '[:lower:]')"

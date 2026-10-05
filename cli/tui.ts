@@ -247,7 +247,8 @@ export async function startTui(o: TuiOptions): Promise<void> {
     if (pane === 0) {
       alerts.forEach((a, i) => {
         const sil = silencedBy(a, silences);
-        row(i, alertTitle(a), `${sil ? YELLOW(`silenced → ${sil.endsAt.slice(11, 16)}Z `) : ""}${DIM(a.annotations?.summary ?? a.annotations?.description ?? "")}`);
+        const cluster = a.labels?.cluster ? DIM(`[${a.labels.cluster}] `) : "";
+        row(i, alertTitle(a), `${cluster}${sil ? YELLOW(`silenced → ${sil.endsAt.slice(11, 16)}Z `) : ""}${DIM(a.annotations?.summary ?? a.annotations?.description ?? "")}`);
       });
       const hiddenSil = allAlerts.length - alerts.length;
       if (!alerts.length) lines.push(DIM(hiddenSil ? `  ${hiddenSil} silenced hidden (S)` : "  none"));
@@ -359,8 +360,8 @@ export async function startTui(o: TuiOptions): Promise<void> {
         const steps = [
           `new beam for the executor${prog.beam ? `  ${prog.beam}` : ""}`,
           `one-change bot + one-time join token${prog.bot ? `  ${prog.bot}` : ""}`,
-          "bootstrap: tbot joins as the bot, cr-exec starts",
-          `publish cr-exec as a Teleport app${prog.app ? `  ${prog.app}` : ""}`,
+          "bootstrap: tbot joins as the bot, plan-runner starts",
+          `publish plan-runner as a Teleport app${prog.app ? `  ${prog.app}` : ""}`,
           "Access Request for that app · needs a reviewer's approval",
         ];
         return [
@@ -849,10 +850,10 @@ export async function startTui(o: TuiOptions): Promise<void> {
       if (re.test(text)) prog.step = Math.max(prog.step, step);
     };
     prog.beam = text.match(/executor beam (\S+) created/)?.[1] ?? prog.beam;
-    prog.bot = text.match(/create executor bot (cr-[0-9a-f]+)/)?.[1] ?? prog.bot;
+    prog.bot = text.match(/create executor bot (administrator-[0-9a-f]+)/)?.[1] ?? prog.bot;
     prog.app = text.match(/published app (\S+)/)?.[1] ?? prog.app;
     at(/create executor bot/, 1);
-    at(/copy cr-exec|bootstrap/, 2);
+    at(/copy plan-runner|bootstrap/, 2);
     at(/publish/, 3);
     at(/file the (Access Request|change request)/, 4);
     p.progress = prog;
@@ -1193,7 +1194,7 @@ export async function startTui(o: TuiOptions): Promise<void> {
     inv.beam = undefined;
     inv.attach = undefined;
     inv.pending = undefined;
-    investigations = investigations.filter((v) => v !== inv); // the draft file stays in ~/.cr
+    investigations = investigations.filter((v) => v !== inv); // the draft file stays in ~/.oncall
     sel[1] = Math.min(sel[1], Math.max(0, investigations.length - 1));
     saveInv();
     if (problems.length) throw new Error(`teardown finished with problems: ${problems.join("; ")}`);
@@ -1304,7 +1305,7 @@ export async function startTui(o: TuiOptions): Promise<void> {
     applyAlertFilter();
   }
   async function doUnsilence(sil: Silence) {
-    await expireSilence(sil.id);
+    await expireSilence(sil);
     pushLog(GREEN(`unsilenced (${sil.id.slice(0, 8)})`));
     silences = await fetchSilences().catch(() => silences);
     applyAlertFilter();
@@ -1565,7 +1566,7 @@ function run(cmd: string, args: string[]): Promise<{ ok: boolean; err: string }>
 //
 // pi-tui enables the Kitty keyboard protocol, bracketed paste and the alternate screen; if the
 // process dies without tui.stop() the shell is left reading CSI-u sequences ("a7;1:3u").
-// Any exit path restores the terminal, and crashes are written to ~/.cr/oncall.log.
+// Any exit path restores the terminal, and crashes are written to ~/.oncall/oncall.log.
 
 const RESTORE = "\x1b[<u\x1b[?2004l\x1b[?1049l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l";
 
@@ -1589,7 +1590,7 @@ function installCrashGuard(tui: { stop: () => void }) {
     } catch {
       /* ignore */
     }
-    process.stderr.write(`\noncall: ${kind}: ${msg}\n(details in ~/.cr/oncall.log)\n`);
+    process.stderr.write(`\noncall: ${kind}: ${msg}\n(details in ~/.oncall/oncall.log)\n`);
     process.exit(1);
   };
   process.on("uncaughtException", crash("uncaught exception"));

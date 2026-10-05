@@ -1,9 +1,17 @@
 // Active alerts for the TUI. Reads Alertmanager through the Kubernetes API
 // server's service proxy using the operator's Teleport kube access
 // (`tsh kube login <cluster>` once), or from a JSON file for demos.
+//
+// Multi-cluster: with no explicit `kubeCluster`, every kube cluster this
+// identity can see in Teleport (`tsh kube ls`) is polled and the results
+// merged — Teleport RBAC already scopes which clusters that is, so there's
+// no separate allowlist here. Each cluster's kube-prometheus-stack sets
+// `prometheus.prometheusSpec.externalLabels.cluster` (demo/kubeup.sh), so
+// every alert already carries `labels.cluster`; fetchAlertsFromCluster stamps
+// it defensively in case that's missing.
 
 import { readFileSync } from "node:fs";
-import { run, runOk } from "./teleport";
+import { runOk, listKubeClusters } from "./teleport";
 
 export interface Alert {
   labels: Record<string, string>;
@@ -16,17 +24,14 @@ export interface Alert {
 
 export interface AlertSource {
   file?: string;
+  /** Pin to one cluster instead of discovering every cluster visible in Teleport. */
   kubeCluster?: string;
   namespace?: string;
   service?: string;
 }
 
-export async function fetchAlerts(src: AlertSource): Promise<Alert[]> {
-  if (src.file) {
-    const raw = JSON.parse(readFileSync(src.file, "utf8"));
-    return Array.isArray(raw) ? raw : [raw];
-  }
-  const cluster = src.kubeCluster ?? "oncall";
+/** The kubectl context and proxy path prefix for Alertmanager through Teleport, for one cluster. */
+async function amRoute(cluster: string, src: AlertSource): Promise<{ context: string; prefix: string }> {
   const ns = src.namespace ?? "monitoring";
   const svc = src.service ?? "alertmanager-operated:9093";
   // Always go through Teleport: log in (idempotent; also refreshes the kube cert) and pin the
@@ -35,26 +40,31 @@ export async function fetchAlerts(src: AlertSource): Promise<Alert[]> {
   await runOk(["tsh", "--proxy", proxy, "kube", "login", cluster], { echo: false });
   const status = JSON.parse(await runOk(["tsh", "--proxy", proxy, "status", "--format", "json"], { echo: false }));
   const teleportCluster: string = status?.active?.cluster ?? proxy.replace(/:\d+$/, "");
-  const context = `${teleportCluster}-${cluster}`;
+  return { context: `${teleportCluster}-${cluster}`, prefix: `/api/v1/namespaces/${ns}/services/${svc}/proxy/api/v2` };
+}
+
+/** Active alerts from one cluster's Alertmanager. */
+async function fetchAlertsFromCluster(cluster: string, src: AlertSource): Promise<Alert[]> {
+  const { context, prefix } = await amRoute(cluster, src);
   const out = await runOk(
-    ["kubectl", "--context", context, "get", "--raw", `/api/v1/namespaces/${ns}/services/${svc}/proxy/api/v2/alerts?active=true&silenced=false&inhibited=false`],
+    ["kubectl", "--context", context, "get", "--raw", `${prefix}/alerts?active=true&silenced=false&inhibited=false`],
     { echo: false },
   );
   const alerts = JSON.parse(out) as Alert[];
-  // hide Watchdog and inhibited/info noise
-  return alerts.filter((a) => a.labels?.alertname !== "Watchdog" && a.labels?.alertname !== "InfoInhibitor");
+  return alerts
+    .filter((a) => a.labels?.alertname !== "Watchdog" && a.labels?.alertname !== "InfoInhibitor") // hide noise
+    .map((a) => (a.labels?.cluster ? a : { ...a, labels: { ...a.labels, cluster } })); // defensive stamp
 }
 
-/** The kubectl context and proxy path prefix for Alertmanager through Teleport (same route fetchAlerts uses). */
-async function amRoute(src: AlertSource): Promise<{ context: string; prefix: string }> {
-  const cluster = src.kubeCluster ?? "oncall";
-  const ns = src.namespace ?? "monitoring";
-  const svc = src.service ?? "alertmanager-operated:9093";
-  const proxy = process.env.CR_PROXY ?? "flat-pine.beams.sh:443";
-  await runOk(["tsh", "--proxy", proxy, "kube", "login", cluster], { echo: false });
-  const status = JSON.parse(await runOk(["tsh", "--proxy", proxy, "status", "--format", "json"], { echo: false }));
-  const teleportCluster: string = status?.active?.cluster ?? proxy.replace(/:\d+$/, "");
-  return { context: `${teleportCluster}-${cluster}`, prefix: `/api/v1/namespaces/${ns}/services/${svc}/proxy/api/v2` };
+export async function fetchAlerts(src: AlertSource): Promise<Alert[]> {
+  if (src.file) {
+    const raw = JSON.parse(readFileSync(src.file, "utf8"));
+    return Array.isArray(raw) ? raw : [raw];
+  }
+  if (src.kubeCluster) return fetchAlertsFromCluster(src.kubeCluster, src);
+  const clusters = await listKubeClusters();
+  const perCluster = await Promise.all(clusters.map((c) => fetchAlertsFromCluster(c.name, src)));
+  return perCluster.flat();
 }
 
 export interface Silence {
@@ -65,6 +75,8 @@ export interface Silence {
   createdBy: string;
   comment: string;
   status?: { state?: string };
+  /** Which cluster's Alertmanager this silence lives in; stamped by fetchSilences, needed to route expireSilence. */
+  cluster?: string;
 }
 
 /**
@@ -102,7 +114,9 @@ async function withKubeProxy<T>(context: string, fn: (base: string) => Promise<T
  * namespace/deployment/pod labels present, so only this alert instance is muted. Returns the silence id.
  */
 export async function silenceAlert(a: Alert, minutes: number, comment: string, createdBy: string, src: AlertSource = {}): Promise<string> {
-  const { context, prefix } = await amRoute(src);
+  const cluster = a.labels?.cluster ?? src.kubeCluster;
+  if (!cluster) throw new Error(`silenceAlert: alert ${a.labels?.alertname ?? "?"} has no cluster label`);
+  const { context, prefix } = await amRoute(cluster, src);
   const keys = ["alertname", "namespace", "deployment", "pod", "instance"].filter((k) => a.labels?.[k]);
   const body = {
     matchers: keys.map((k) => ({ name: k, value: a.labels[k], isEqual: true, isRegex: false })),
@@ -120,18 +134,28 @@ export async function silenceAlert(a: Alert, minutes: number, comment: string, c
   });
 }
 
-/** Active silences, to mark muted alerts. */
-export async function fetchSilences(src: AlertSource = {}): Promise<Silence[]> {
-  const { context, prefix } = await amRoute(src);
+/** Active silences from one cluster's Alertmanager, stamped with that cluster. */
+async function fetchSilencesFromCluster(cluster: string, src: AlertSource): Promise<Silence[]> {
+  const { context, prefix } = await amRoute(cluster, src);
   const out = await runOk(["kubectl", "--context", context, "get", "--raw", `${prefix}/silences?silenced=false&inhibited=false`], { echo: false });
-  return (JSON.parse(out) as Silence[]).filter((s) => s.status?.state === "active");
+  return (JSON.parse(out) as Silence[]).filter((s) => s.status?.state === "active").map((s) => ({ ...s, cluster }));
 }
 
-/** Remove a silence (DELETE /api/v2/silence/{id}). */
-export async function expireSilence(id: string, src: AlertSource = {}): Promise<void> {
-  const { context, prefix } = await amRoute(src);
+/** Active silences, to mark muted alerts. Same discover-and-merge behavior as fetchAlerts. */
+export async function fetchSilences(src: AlertSource = {}): Promise<Silence[]> {
+  if (src.kubeCluster) return fetchSilencesFromCluster(src.kubeCluster, src);
+  const clusters = await listKubeClusters();
+  const perCluster = await Promise.all(clusters.map((c) => fetchSilencesFromCluster(c.name, src)));
+  return perCluster.flat();
+}
+
+/** Remove a silence (DELETE /api/v2/silence/{id}), routed to the cluster it was fetched from. */
+export async function expireSilence(sil: Silence, src: AlertSource = {}): Promise<void> {
+  const cluster = sil.cluster ?? src.kubeCluster;
+  if (!cluster) throw new Error(`expireSilence: silence ${sil.id} has no cluster`);
+  const { context, prefix } = await amRoute(cluster, src);
   await withKubeProxy(context, async (base) => {
-    const r = await fetch(`${base}${prefix}/silence/${id}`, { method: "DELETE" });
+    const r = await fetch(`${base}${prefix}/silence/${sil.id}`, { method: "DELETE" });
     if (!r.ok) throw new Error(`alertmanager: ${r.status} ${(await r.text()).slice(0, 200)}`);
   });
 }

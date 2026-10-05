@@ -6,11 +6,11 @@ import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { PROXY, REPO, addBotLabels, beamExec, beamExecArgv, beamExecOk, beamInit, beamScp, beamScpFrom, bundle, createBeam, createBoundKeypairToken, currentUser, ensureBot, publishedAppName, removeBeam, removeBot, stateDir, step, type BotLabels } from "./beamops";
+import { PROXY, REPO, addBotLabels, ambientEnv, beamExec, beamExecArgv, beamExecOk, beamInit, beamScp, beamScpFrom, bundle, createBeam, createBoundKeypairToken, currentUser, ensureBot, publishedAppName, removeBeam, removeBot, stateDir, step, type BotLabels } from "./beamops";
 import { echo, runOk } from "../shared/teleport";
 
-const INVESTIGATOR_ROLE = process.env.CR_INVESTIGATOR_ROLE ?? "cr-investigator";
-const KUBE_CLUSTER = process.env.CR_KUBE_CLUSTER ?? "oncall";
+const INVESTIGATOR_ROLE = process.env.CR_INVESTIGATOR_ROLE ?? "operator";
+const KUBE_CLUSTER = process.env.CR_KUBE_CLUSTER ?? "emailpals-production";
 
 export interface InvestigateOptions {
   alertFile: string;
@@ -51,13 +51,16 @@ export interface InvestigateResult {
 export async function investigate(o: InvestigateOptions): Promise<InvestigateResult> {
   const alert = JSON.parse(readFileSync(o.alertFile, "utf8"));
   const alertName = alert?.labels?.alertname ?? "alert";
+  // Alertmanager stamps each alert with the cluster it fired on (demo/kubeup.sh's externalLabels);
+  // fall back to the global default for alert sources that don't carry it (e.g. a hand-written demo file).
+  const kubeCluster: string = alert?.labels?.cluster ?? KUBE_CLUSTER;
   const runId = randomBytes(3).toString("hex");
   const bot = o.mockKubectl ? undefined : `cr-inv-${runId}`;
   const emit = o.onOutput ?? ((s: string) => process.stdout.write(s));
 
   step(`bundle investigator and executor`);
   await bundle("bundle:investigate");
-  await bundle("bundle:cr-exec"); // the investigator ships the executor itself (submit-cr.sh)
+  await bundle("bundle:plan-runner"); // the investigator ships the executor itself (submit-cr.sh)
 
   step(`create investigation beam`);
   const beam = await createBeam();
@@ -87,10 +90,10 @@ export async function investigate(o: InvestigateOptions): Promise<InvestigateRes
   ];
   // the investigator registers the executor from its beam: executor bundle, templates, submit script, and who it is
   const selfFile = join(stateDir(), `self-${runId}.json`);
-  writeFileSync(selfFile, JSON.stringify({ alias: beam.id, uuid: beam.uuid, owner: await currentUser(), kubeCluster: KUBE_CLUSTER, proxy: PROXY }, null, 2));
+  writeFileSync(selfFile, JSON.stringify({ alias: beam.id, uuid: beam.uuid, owner: await currentUser(), kubeCluster, proxy: PROXY }, null, 2));
   entries.push(
-    { local: join(REPO, "dist/cr-exec.mjs"), remote: "investigate/exec/cr-exec.mjs" },
-    { local: join(REPO, "cr-exec/bootstrap.sh"), remote: "investigate/exec/bootstrap.sh" },
+    { local: join(REPO, "dist/plan-runner.mjs"), remote: "investigate/exec/plan-runner.mjs" },
+    { local: join(REPO, "plan-runner/bootstrap.sh"), remote: "investigate/exec/bootstrap.sh" },
     { local: join(REPO, "teleport/bot.yaml.tmpl"), remote: "investigate/teleport/bot.yaml.tmpl" },
     { local: join(REPO, "teleport/token.yaml.tmpl"), remote: "investigate/teleport/token.yaml.tmpl" },
     { local: join(REPO, "investigator/submit-cr.sh"), remote: "investigate/submit-cr.sh" },
@@ -110,10 +113,10 @@ export async function investigate(o: InvestigateOptions): Promise<InvestigateRes
     runArgs = ["/home/beams/bin/kubectl"];
   } else {
     step(`bootstrap inside ${beam.id}: enroll read-only bot, tbot kubeconfig, kubectl`);
-    const boot = await beamExec(beam.id, ["bash", "/home/beams/investigate/bootstrap.sh", PROXY, bot!, secret, KUBE_CLUSTER], { redact: [secret] });
+    const boot = await beamExec(beam.id, ["bash", "/home/beams/investigate/bootstrap.sh", PROXY, bot!, secret, kubeCluster], { redact: [secret] });
     emit(boot.stdout);
     if (boot.code !== 0) throw new Error(`investigation bootstrap failed:\n${boot.stderr}`);
-    runArgs = ["/home/beams/bin/kubectl", "/home/beams/kube/kubeconfig.yaml"];
+    runArgs = ["/home/beams/bin/kubectl", "/home/beams/kube/kubeconfig.yaml", "/home/beams/bot-id/identity"];
   }
 
   step(`start investigator under tmux in ${beam.id} (alert ${alertName})`);
@@ -122,7 +125,7 @@ export async function investigate(o: InvestigateOptions): Promise<InvestigateRes
   if (recorder) o.onRecorder?.(recorder);
 
   step(`publish the investigator's API as a Teleport app`);
-  const pub = await runOk(["tsh", "--proxy", PROXY, "beams", "publish", beam.id]);
+  const pub = await runOk(["tsh", "--proxy", PROXY, "beams", "publish", beam.id], { env: ambientEnv() });
   const appUrl = pub.match(/https:\/\/\S+/)?.[0];
   const app = appUrl ? new URL(appUrl).hostname.split(".")[0] : publishedAppName(beam);
   if (bot) await addBotLabels(bot, { "oncall/app": app }).catch((e: Error) => emit(`could not label bot with app: ${e.message}\n`));
@@ -177,7 +180,7 @@ export async function pushDraft(beam: string, localPath: string): Promise<void> 
  */
 export function startRecorder(beam: string): ChildProcess {
   const cmd = `stty cols 200 rows 50 2>/dev/null; exec tsh --proxy ${PROXY} beams ssh ${beam}`;
-  const child = spawn("script", ["-q", "/dev/null", "sh", "-c", cmd], { stdio: ["ignore", "ignore", "ignore"], env: { ...process.env, TERM: "xterm-256color" } });
+  const child = spawn("script", ["-q", "/dev/null", "sh", "-c", cmd], { stdio: ["ignore", "ignore", "ignore"], env: { ...ambientEnv(), TERM: "xterm-256color" } });
   echo(`$ script -q /dev/null tsh --proxy ${PROXY} beams ssh ${beam}   # recording client`);
   return child;
 }
@@ -191,7 +194,7 @@ export async function cleanupInvestigation(beam: string, bot?: string): Promise<
 function tailUntil(argv: string[], emit: (s: string) => void, stop: RegExp): Promise<string> {
   echo(`$ ${argv.join(" ")}`);
   return new Promise((resolve, reject) => {
-    const child = spawn(argv[0], argv.slice(1), { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(argv[0], argv.slice(1), { stdio: ["ignore", "pipe", "pipe"], env: ambientEnv() });
     let all = "";
     let done = false;
     const finish = () => {
@@ -215,7 +218,7 @@ function tailUntil(argv: string[], emit: (s: string) => void, stop: RegExp): Pro
   });
 }
 
-/** The local terminal's terminfo source (`infocmp -x $TERM`), written to ~/.cr, or undefined if unavailable. */
+/** The local terminal's terminfo source (`infocmp -x $TERM`), written to ~/.oncall, or undefined if unavailable. */
 function localTerminfo(): string | undefined {
   const term = process.env.TERM;
   if (!term || /^(xterm|xterm-256color|screen|tmux|dumb)$/.test(term)) return undefined; // beam image already has these

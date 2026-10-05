@@ -9,7 +9,7 @@
 //   oncall exec|verify|rollback <request-id>                one operation on the executor (one step at a time)
 //   oncall exec-status <request-id>
 //   oncall teardown <request-id>
-//   oncall run dev --url http://127.0.0.1:8080/mcp           dev: local cr-exec started with --insecure-*
+//   oncall run dev --url http://127.0.0.1:8080/mcp           dev: local plan-runner started with --insecure-*
 //
 // Every tsh/tctl command is echoed to stderr. That is the demo narration.
 

@@ -1,4 +1,4 @@
-// Approval gate. cr-exec never trusts a CR handed to it on the command line;
+// Approval gate. plan-runner never trusts a CR handed to it on the command line;
 // it loads the CR from the Access Request itself, via the bot identity, and
 // re-checks the request state on every tool call (with a short cache).
 

@@ -5,7 +5,7 @@
     "pod": "emailpals-api-5d8f7c9b6-x2k9p",
     "container": "emailpals-api",
     "severity": "warning",
-    "cluster": "oncall"
+    "cluster": "emailpals-production"
   },
   "annotations": {
     "description": "Pod emailpals/emailpals-api-5d8f7c9b6-x2k9p (emailpals-api) is in waiting state (reason: \"ImagePullBackOff\").",

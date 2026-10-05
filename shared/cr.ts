@@ -1,5 +1,5 @@
 // Change request schema and parsing. Shared by the `cr` CLI (submit) and
-// cr-exec (load from the approved Access Request).
+// plan-runner (load from the approved Access Request).
 //
 // The CR is plain YAML carried in the Access Request `reason` field, which
 // Teleport caps at 4096 bytes. Each step has a `run` command and optional

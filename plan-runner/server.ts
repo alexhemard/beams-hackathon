@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// cr-exec: MCP server for one change request. Tools: status, exec, verify, rollback (fixed);
+// plan-runner: MCP server for one change request. Tools: status, exec, verify, rollback (fixed);
 // each call is checked against approval and execution state and errors when invalid.
 // Runs inside the executor beam next to a tbot holding the per-CR bot identity; served over
 // streamable HTTP as a plain Teleport HTTP app.
@@ -20,6 +20,7 @@ import { CallerVerifier, InsecureHeaderVerifier, type Caller } from "./identity"
 import { execCommand } from "./exec";
 import { CRState, toolName, type Operation } from "./state";
 import { STATUS_TOOL } from "../shared/cr";
+import { TRUSTED_BOT_USERNAME } from "../shared/teleport";
 
 const { values: args } = parseArgs({
   options: {
@@ -121,7 +122,7 @@ const DESCRIBE: Record<Operation, string> = {
 };
 
 function newSession(transport: StreamableHTTPServerTransport, caller: Caller): Session {
-  const server = new McpServer({ name: `cr-exec:${args.cr!.slice(0, 8)}`, version: "0.1.0" });
+  const server = new McpServer({ name: `plan-runner:${args.cr!.slice(0, 8)}`, version: "0.1.0" });
   const sess: Session = { server, transport, caller };
   server.registerTool(
     STATUS_TOOL,
@@ -155,7 +156,7 @@ async function runOperation(op: Operation, caller: Caller | undefined, expect?: 
   } catch (e) {
     return deny(`not approved: ${(e as Error).message}`);
   }
-  if (caller.username !== approval.request.user) {
+  if (caller.username !== approval.request.user && caller.username !== TRUSTED_BOT_USERNAME) {
     return deny(`caller ${caller.username} is not the requester ${approval.request.user}`);
   }
   if (inflight) return deny(`${inflight.op} of step ${inflight.step} (${inflight.kind}) is still running since ${inflight.since}; one operation at a time`);
@@ -253,7 +254,7 @@ const http = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     log("audit", "rejected request", { reason: (e as Error).message });
     return json(res, 401, { error: (e as Error).message });
   }
-  if (caller.username !== requester) {
+  if (caller.username !== requester && caller.username !== TRUSTED_BOT_USERNAME) {
     log("audit", "rejected non-requester", { caller: caller.username, requester });
     return json(res, 403, { error: `only the requester (${requester}) may drive this change request` });
   }
@@ -288,7 +289,7 @@ process.on("uncaughtException", (e) => log("error", "uncaught", { error: e.messa
 process.on("unhandledRejection", (e) => log("error", "unhandled rejection", { error: String(e) }));
 
 const port = Number(args.port);
-http.listen(port, "0.0.0.0", () => log("info", "cr-exec listening", { port, path: "/mcp", cr: args.cr, auto: args.auto }));
+http.listen(port, "0.0.0.0", () => log("info", "plan-runner listening", { port, path: "/mcp", cr: args.cr, auto: args.auto }));
 
 if (args.auto) {
   // Deterministic runner: wait for approval, then verify a step that just ran,

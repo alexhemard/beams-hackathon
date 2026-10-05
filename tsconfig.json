@@ -15,7 +15,7 @@
   },
   "include": [
     "cli/**/*.ts",
-    "cr-exec/**/*.ts",
+    "plan-runner/**/*.ts",
     "investigator/**/*.ts",
     "shared/**/*.ts"
   ]

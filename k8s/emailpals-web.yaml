@@ -1,5 +1,5 @@
 # emailpals-web: the E-mail Pals site (https://github.com/alexhemard/email-pals), served by nginx.
-# Content comes from ConfigMaps built out of k8s/emailpals-web/site by demo/up.sh:
+# Content comes from ConfigMaps built out of k8s/emailpals-web/site by demo/kubeup.sh:
 #   emailpals-web-root   index.html
 #   emailpals-web-css    css/
 #   emailpals-web-images images/

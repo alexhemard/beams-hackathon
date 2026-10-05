@@ -4,10 +4,10 @@
 //   editor: nvim                     # for e (edit draft CR); default $VISUAL, $EDITOR, vi
 //   attach: tab                      # tab | window | terminal | print  (A: open beam tmux)
 //   proxy: flat-pine.beams.sh:443    # Teleport proxy
-//   kube_cluster: oncall             # Teleport name of the demo cluster (alerts, investigations)
+//   kube_cluster: emailpals-production  # pins the TUI to one cluster instead of discovering all (tsh kube ls)
 //   refresh_every: 20                # seconds between TUI refreshes (0 disables)
 //   target: kube                     # kube | tctl
-//   reviewer: cr-reviewer            # a / d in the CR tab review as this user (own tsh profile)
+//   reviewer: webmaster              # a / d in the CR tab review as this user (own tsh profile)
 //   reviewer_home: ~/.tsh-reviewer
 //   hide_closed_after: 30            # minutes; closed/denied/expired CRs drop off the list (H toggles)
 //   silence_minutes: 120             # m silences the selected alert for this long

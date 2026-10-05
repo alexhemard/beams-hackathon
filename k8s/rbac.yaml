@@ -2,8 +2,17 @@
 # Kubernetes groups (kubernetes_groups); these bindings decide what those groups
 # may do.
 #
-#   oncall-view  read-only: investigator bot, on-call operator (TUI)
-#   oncall-fix   write in namespace emailpals: executor bot (cr-exec)
+#   oncall-view    read-only: investigator bot, on-call operator (TUI)
+#   administrator  full cluster-admin: per-CR executor bots, and the short-lived
+#                  cluster-setup bot demo/lib-teleport-admin.sh mints on demand
+#                  for demo/kubeup.sh / break.sh / reset.sh. Neither is ever held
+#                  standing. Not namespace-scoped — see terraform/roles.tf for the
+#                  trade-off this accepts on a demo cluster.
+#
+# Applied by the one-time CodeBuild bootstrap (terraform/bootstrap.tf) via its
+# EKS access entry (IAM-mediated, no RBAC dependency), before anything else —
+# this file is what makes the administrator group (and so every bot that holds
+# the administrator Teleport role) mean anything at all.
 ---
 # Read-only, cluster-wide, plus the API server's service proxy so Alertmanager
 # can be read with `kubectl get --raw .../services/alertmanager-operated:9093/proxy/...`.
@@ -43,27 +52,14 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: ClusterRoleBinding
 metadata:
-  name: oncall-fix
-rules:
-  - apiGroups: ["apps"]
-    resources: ["deployments", "deployments/scale", "replicasets"]
-    verbs: ["get", "list", "watch", "patch", "update"]
-  - apiGroups: [""]
-    resources: ["pods", "events"]
-    verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: oncall-fix
-  namespace: emailpals
+  name: administrator
 subjects:
   - kind: Group
-    name: oncall-fix
+    name: administrator
     apiGroup: rbac.authorization.k8s.io
 roleRef:
   kind: ClusterRole
-  name: oncall-fix
+  name: cluster-admin
   apiGroup: rbac.authorization.k8s.io

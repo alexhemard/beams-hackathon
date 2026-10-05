@@ -7,7 +7,7 @@
 # from tbot, downloads kubectl. The agent itself is started by a second exec so
 # its output streams back to the caller.
 set -euo pipefail
-PROXY="$1"; TOKEN="$2"; SECRET="$3"; KUBE_CLUSTER="${4:-oncall}"
+PROXY="$1"; TOKEN="$2"; SECRET="$3"; KUBE_CLUSTER="${4:-emailpals-production}"
 TELEPORT_VERSION="${TELEPORT_VERSION:-18.11.1}"
 HOME_DIR=/home/beams
 BIN="$HOME_DIR/bin"; STORAGE="$HOME_DIR/tbot-storage"; BOT_ID="$HOME_DIR/bot-id"; KUBE="$HOME_DIR/kube"
@@ -31,7 +31,11 @@ if [ ! -x "$BIN/kubectl" ]; then
 fi
 
 echo "== enroll read-only bot =="
-if [ ! -f "$STORAGE/identity" ]; then
+# $STORAGE/identity never exists (tbot's directory storage doesn't write a file by
+# that name); check the rendered destination file instead, like plan-runner/bootstrap.sh
+# does, so a re-run doesn't re-enroll and collide with the long-running tbot's lock
+# on $STORAGE.
+if [ ! -f "$BOT_ID/identity" ]; then
   scrub "$BIN/tbot" start identity --proxy-server="$PROXY" --token="$TOKEN" --registration-secret="$SECRET" \
     --join-method=bound_keypair --storage="$STORAGE" --destination="$BOT_ID" --oneshot
 fi
@@ -54,7 +58,9 @@ services:
       type: directory
       path: $KUBE
 EOF
-if ! pgrep -f "tbot start -c $HOME_DIR/tbot.yaml" >/dev/null 2>&1; then
+# pgrep can't see across exec contexts that share this filesystem but not a PID
+# namespace; tbot's own storage lock is filesystem-level, so check that instead.
+if flock -n -x "$STORAGE/lock" -c true 2>/dev/null; then
   scrub setsid nohup "$BIN/tbot" start -c "$HOME_DIR/tbot.yaml" > "$HOME_DIR/logs/tbot.log" 2>&1 < /dev/null &
 fi
 for i in $(seq 1 30); do [ -f "$KUBE/kubeconfig.yaml" ] && break; sleep 1; done

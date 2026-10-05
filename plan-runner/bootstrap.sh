@@ -3,13 +3,13 @@
 #
 #   bootstrap.sh <proxy:443> <token-name> <registration-secret> <executor-bot> <target> <requester>
 #     target: kube | tctl
-#   Register-then-request: cr-exec starts from /home/beams/cr-exec/cr.yaml and discovers the
+#   Register-then-request: plan-runner starts from /home/beams/plan-runner/cr.yaml and discovers the
 #   Access Request that names <executor-bot> once the operator files it.
 #
 # 1. downloads tbot, tctl and kubectl
 # 2. enrolls a per-CR bot with a one-time bound-keypair secret (Cassie's quickstart, Part 2)
 # 3. runs tbot with an identity output (and a kube output for the kube target)
-# 4. starts cr-exec on :8080
+# 4. starts plan-runner on :8080
 #
 # beamctl is not available through `tsh beams exec` on this tenant, so long-running
 # processes are detached with setsid/nohup.
@@ -19,7 +19,7 @@ PROXY="$1"; TOKEN="$2"; SECRET="$3"; EXECUTOR="$4"; TARGET="${5:-kube}"; REQUEST
 TELEPORT_VERSION="${TELEPORT_VERSION:-18.11.1}"
 HOME_DIR=/home/beams
 BIN="$HOME_DIR/bin"; STORAGE="$HOME_DIR/tbot-storage"; BOT_ID="$HOME_DIR/bot-id"; KUBE="$HOME_DIR/kube"
-APP="$HOME_DIR/cr-exec"
+APP="$HOME_DIR/plan-runner"
 mkdir -p "$BIN" "$STORAGE" "$BOT_ID" "$KUBE" "$APP" "$HOME_DIR/logs"
 
 # The beam's TELEPORT_* vars point at the delegated identity and override config
@@ -49,8 +49,10 @@ else
 fi
 
 echo "== 3. tbot services =="
-if pgrep -f "tbot start -c $HOME_DIR/tbot.yaml" >/dev/null 2>&1; then
-  echo "tbot already running"
+if ! flock -n -x "$STORAGE/lock" -c true 2>/dev/null; then
+  # pgrep can't see across exec contexts that share this filesystem but not a PID
+  # namespace; tbot's own storage lock is filesystem-level, so check that instead.
+  echo "tbot already running (storage lock held)"
 else
 {
   cat <<EOF
@@ -73,7 +75,7 @@ EOF
     cat <<EOF
   - type: kubernetes/v2
     selectors:
-      - name: ${KUBE_CLUSTER:-oncall}
+      - name: ${KUBE_CLUSTER:-emailpals-production}
     destination:
       type: directory
       path: $KUBE
@@ -89,18 +91,18 @@ done
 grep -E "identity|Listening|error" "$HOME_DIR/logs/tbot.log" | tail -3 || true
 [ -f "$BOT_ID/identity" ] || { echo "tbot did not produce an identity"; tail -20 "$HOME_DIR/logs/tbot.log"; exit 1; }
 
-echo "== 4. cr-exec =="
-pkill -f "cr-exec.mjs" >/dev/null 2>&1 || true
+echo "== 4. plan-runner =="
+pkill -f "plan-runner.mjs" >/dev/null 2>&1 || true
 sleep 1
 ALLOW="tctl"; EXTRA=()
 if [ "$TARGET" = "kube" ]; then ALLOW="kubectl"; EXTRA=(--kubeconfig "$KUBE/kubeconfig.yaml"); fi
-scrub setsid nohup node "$APP/cr-exec.mjs" --cr-file "$APP/cr.yaml" --executor "$EXECUTOR" --requester "$REQUESTER" \
+scrub setsid nohup node "$APP/plan-runner.mjs" --cr-file "$APP/cr.yaml" --executor "$EXECUTOR" --requester "$REQUESTER" \
   --identity "$BOT_ID/identity" --proxy "$PROXY" \
-  --allow "$ALLOW" --path-prepend "$BIN" --port 8080 "${EXTRA[@]}" > "$HOME_DIR/logs/cr-exec.log" 2>&1 < /dev/null &
+  --allow "$ALLOW" --path-prepend "$BIN" --port 8080 "${EXTRA[@]}" > "$HOME_DIR/logs/plan-runner.log" 2>&1 < /dev/null &
 for i in $(seq 1 20); do
   curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 && break
   sleep 1
 done
-curl -fsS http://127.0.0.1:8080/healthz || { echo "cr-exec failed to start"; tail -30 "$HOME_DIR/logs/cr-exec.log"; exit 1; }
+curl -fsS http://127.0.0.1:8080/healthz || { echo "plan-runner failed to start"; tail -30 "$HOME_DIR/logs/plan-runner.log"; exit 1; }
 echo
 echo "bootstrap complete"

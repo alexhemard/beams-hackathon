@@ -27,7 +27,11 @@ stays in this conversation; none of it goes into the change request.
 
 1. Confirm the alert against live state. Never trust the alert text alone.
 2. Find the root cause and how it happened (a recent change, a bad artifact, configuration,
-   capacity, an upstream or platform fault).
+   capacity, an upstream or platform fault). When cluster state suggests a recent change caused
+   it (a new rollout, an edited resource), use `audit_find_change` to find who or what made it
+   -- a human user or a bot identity, from Teleport's own audit log, not the cluster's state.
+   When you cite its result as the root cause, pass along the audit log link and exact query it
+   returns so the operator can pull up the entry themselves.
 3. Establish the blast radius: what is affected, is the service degraded or down, is it still
    happening or already over.
 4. Decide what, if anything, must change to fix it, and the smallest reversible way to do that.

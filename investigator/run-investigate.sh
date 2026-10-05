@@ -3,14 +3,17 @@
 # on-call operator can attach and watch:  tsh beams ssh <beam>; tmux attach -t investigate
 # A second tmux window has a shell with the read-only kubeconfig for manual poking.
 #
-#   run-investigate.sh <kubectl-path> [kubeconfig-path]
+#   run-investigate.sh <kubectl-path> [kubeconfig-path] [identity-path]
 set -euo pipefail
-KUBECTL="$1"; KUBECONFIG_PATH="${2:-}"
+KUBECTL="$1"; KUBECONFIG_PATH="${2:-}"; IDENTITY_PATH="${3:-}"
 DIR=/home/beams/investigate
 LOG="$DIR/log"
 : > "$LOG"
 EXTRA=""
 [ -n "$KUBECONFIG_PATH" ] && EXTRA="--kubeconfig $KUBECONFIG_PATH"
+# audit_find_change (root-cause attribution via Teleport's audit log): needs the bot's own
+# identity and tctl, both absent in --mock-kubectl mode (no bot is enrolled there).
+[ -n "$IDENTITY_PATH" ] && EXTRA="$EXTRA --identity $IDENTITY_PATH --tctl $(dirname "$KUBECTL")/tctl"
 rm -f "$DIR/cr.yaml"
 tmux kill-session -t investigate 2>/dev/null || true
 # deep scrollback: the TUI reads the transcript with `tmux capture-pane` from this window

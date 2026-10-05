@@ -1,4 +1,4 @@
-# Join token for the teleport-kube-agent Helm chart in the kind cluster.
+# Join token for the teleport-kube-agent Helm chart in the EKS cluster.
 #
 # For provision tokens the metadata.name IS the join secret the agent presents,
 # so a random string is generated here and exposed only as a sensitive output.
@@ -20,10 +20,10 @@ resource "teleport_provision_token" "kube_agent" {
     name        = random_string.kube_join_token[0].result
     description = "Join token for the ${var.kube_cluster_name} kube agent (beams hackathon)."
     expires     = timeadd(plantimestamp(), var.kube_join_token_ttl)
-    labels      = { "beams-hackathon" = "cr" }
+    labels      = { "teleport.dev/creator" = var.teleport_creator }
   }
   spec = {
-    roles       = ["Kube", "App"] # the kube agent also publishes emailpals-web as an app
+    roles       = ["Kube", "App", "Discovery"] # the kube agent also publishes emailpals-web as an app, discovered automatically
     join_method = "token"
   }
   lifecycle {

@@ -3,6 +3,14 @@
 
 import { spawn } from "node:child_process";
 
+/** Teleport username of the shared `oncall-bot` Machine ID bot `beaminit.sh` provisions in every
+ *  beam (name configurable via `BEAMINIT_BOT_NAME`, same convention as that script). Owner-only
+ *  caller checks (`investigator/agent.ts`, `plan-runner/server.ts`) trust this bot as a stand-in
+ *  for the human owner/requester, since it's the identity `cli/appproxy.ts` uses to reach these
+ *  APIs from inside a beam (the beam's own identity can't reissue the app cert `tsh proxy app`
+ *  needs). */
+export const TRUSTED_BOT_USERNAME = `bot-${process.env.BEAMINIT_BOT_NAME ?? "oncall-bot"}`;
+
 export interface RunResult {
   code: number;
   stdout: string;
@@ -135,4 +143,26 @@ export async function listRequests(o: TshOpts = {}): Promise<AccessRequest[]> {
 export async function getRequest(id: string, o: TshOpts = {}): Promise<AccessRequest | undefined> {
   const all = await listRequests(o);
   return all.find((r) => r.id === id);
+}
+
+// ---- Kube clusters ---------------------------------------------------------
+
+export interface KubeCluster {
+  name: string;
+  labels: Record<string, string>;
+}
+
+/** Normalize `tsh kube ls --format json` output across tsh versions (flat KubeListClusters shape, or resource-style metadata). */
+export function normalizeKubeClusters(raw: unknown): KubeCluster[] {
+  const items = Array.isArray(raw) ? raw : [];
+  return items.map((r: any) => ({
+    name: r.kube_cluster_name ?? r.metadata?.name ?? r.name ?? "",
+    labels: r.labels ?? r.metadata?.labels ?? {},
+  }));
+}
+
+/** Every kube cluster this identity can see (Teleport RBAC already scopes the result; no app-level filtering needed). */
+export async function listKubeClusters(o: TshOpts = {}): Promise<KubeCluster[]> {
+  const raw = await runJson([...tshBase(o), "kube", "ls", "--format", "json"], { env: o.env, echo: false });
+  return normalizeKubeClusters(raw);
 }

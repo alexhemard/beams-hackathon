@@ -21,13 +21,14 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { CallerVerifier, InsecureHeaderVerifier } from "../cr-exec/identity";
+import { CallerVerifier, InsecureHeaderVerifier } from "../plan-runner/identity";
 import { Agent, type AgentTool, type AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Type, type Model, type Api } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { CRSchema, parseCR, serializeCR, validateChangeSemantics, validateCommands, verifyNotes, toArgv, type CR } from "../shared/cr";
+import { TRUSTED_BOT_USERNAME } from "../shared/teleport";
 import bundledPrompt from "./prompt.md"; // fallback copy baked into the bundle at build time
 
 const { values: args } = parseArgs({
@@ -36,6 +37,9 @@ const { values: args } = parseArgs({
     runbooks: { type: "string", default: "./runbooks" },
     kubeconfig: { type: "string" },
     kubectl: { type: "string", default: "kubectl" },
+    /** path to the investigation bot's own renewed identity (bot-id/identity); audit_find_change is unavailable without it */
+    identity: { type: "string" },
+    tctl: { type: "string", default: "tctl" },
     out: { type: "string", default: "cr.yaml" },
     /** Markdown system prompt with {{alert_name}} / {{runbook}} placeholders (investigator/prompt.md) */
     prompt: { type: "string", default: "./prompt.md" },
@@ -97,6 +101,84 @@ const kubectlTool: AgentTool<any> = {
     const r = await run([args.kubectl!, ...(args.kubeconfig ? [`--kubeconfig=${args.kubeconfig}`] : []), ...argv]);
     const text = `exit ${r.code}\n${r.stdout}${r.stderr ? `\n[stderr]\n${r.stderr}` : ""}`.slice(0, 12_000);
     return { content: [{ type: "text", text }], details: { argv, code: r.code } };
+  },
+};
+
+// kube_request audit events are retained for one of these windows; pick the smallest that covers
+// how far back we need to look (tctl rejects any other value).
+const AUDIT_DAY_BUCKETS = [7, 30, 90, 120];
+function auditDays(sinceMs: number): number {
+  const days = Math.ceil((Date.now() - sinceMs) / 86_400_000) + 1;
+  return AUDIT_DAY_BUCKETS.find((d) => d >= days) ?? 120;
+}
+function sqlLit(s: string): string {
+  return `'${String(s).replace(/'/g, "''")}'`;
+}
+
+// Root-cause attribution: who (human or bot identity) made a recent write against the cluster's
+// Kubernetes API, per Teleport's own audit log (kube_request events), not the cluster's state.
+// Needs the "operator" role's audit_query/use grant (terraform/roles.tf) and the investigation
+// bot's own identity -- a single API call, no cert reissue, so the bot's renewed identity
+// (bot-id/identity) works the same way kubectl does.
+const auditTool: AgentTool<any> = {
+  name: "audit_find_change",
+  label: "audit log: who changed it",
+  description:
+    "Search the Teleport audit log's kube_request events (every Kubernetes API call Teleport proxied, successful or not) to find which identity -- a human user or a bot -- made a recent write (PATCH/PUT/POST/DELETE) that could be the root cause. This is Teleport's record of who did it, independent of and often more reliable than cluster state (which only shows the result). Use it when the cause might be a recent human or automated change rather than an organic failure (capacity, upstream, crash).",
+  parameters: Type.Object({
+    namespace: Type.Optional(Type.String({ description: "restrict to this Kubernetes namespace" })),
+    resourceKind: Type.Optional(Type.String({ description: "restrict to this resource kind, e.g. deployments, pods, secrets, configmaps" })),
+    resourceName: Type.Optional(Type.String({ description: "restrict to this exact resource name" })),
+    sinceMinutes: Type.Optional(Type.Number({ description: "how far back to look, in minutes (default: since the alert fired, padded by 30 minutes, or 60 if that can't be determined)" })),
+    includeReads: Type.Optional(Type.Boolean({ description: "include GET/WATCH/LIST too, not just writes (default false)" })),
+    limit: Type.Optional(Type.Number({ description: "max rows, 1-100 (default 20)" })),
+  }),
+  execute: async (_id, p: any) => {
+    if (!args.identity) {
+      return { content: [{ type: "text", text: "audit log lookup is not available in this investigation (no bot identity configured for it)." }], details: { error: true } };
+    }
+    const alertSinceMs = alert?.startsAt ? Date.parse(alert.startsAt) : NaN;
+    const minutes = Number(p?.sinceMinutes) > 0 ? Number(p.sinceMinutes) : Number.isFinite(alertSinceMs) ? Math.max(30, Math.round((Date.now() - alertSinceMs) / 60_000) + 30) : 60;
+    const sinceMs = Date.now() - minutes * 60_000;
+    const since = new Date(sinceMs).toISOString(); // e.g. 2026-09-26T20:02:57.805Z
+    const limit = Math.min(Math.max(Math.trunc(Number(p?.limit) || 20), 1), 100);
+    // event_date/event_time are partition pseudo-columns: any WHERE comparison on them (even
+    // equality) fails with "code 1002"; `time` (the plain varchar event timestamp, same format
+    // as `since`) filters and sorts fine lexicographically.
+    const clauses = [`time >= ${sqlLit(since)}`];
+    if (!p?.includeReads) clauses.push(`verb IN ('PATCH','PUT','POST','DELETE')`);
+    if (self.kubeCluster) clauses.push(`kubernetes_cluster = ${sqlLit(self.kubeCluster)}`);
+    if (p?.namespace) clauses.push(`resource_namespace = ${sqlLit(String(p.namespace))}`);
+    if (p?.resourceKind) clauses.push(`resource_kind = ${sqlLit(String(p.resourceKind))}`);
+    if (p?.resourceName) clauses.push(`resource_name = ${sqlLit(String(p.resourceName))}`);
+    const sql = `SELECT time, user, verb, resource_kind, resource_namespace, resource_name, response_code FROM kube_request WHERE ${clauses.join(" AND ")} ORDER BY time DESC LIMIT ${limit}`;
+    const r = await run([args.tctl!, "audit", "query", "exec", sql, `--days=${auditDays(sinceMs)}`, "--format=json", "--identity", args.identity!, "--auth-server", self.proxy ?? "flat-pine.beams.sh:443"], 30_000);
+    if (r.code !== 0) return { content: [{ type: "text", text: `audit query failed (exit ${r.code}):\n${(r.stderr || r.stdout).slice(0, 2000)}` }], details: { error: true } };
+    let rows: string[][];
+    try {
+      rows = (JSON.parse(r.stdout) as Array<{ data: string[] }>).map((row) => row.data);
+    } catch {
+      return { content: [{ type: "text", text: `could not parse audit query output:\n${r.stdout.slice(0, 2000)}` }], details: { error: true } };
+    }
+    const [header, ...body] = rows;
+    if (!body.length) return { content: [{ type: "text", text: `no matching kube_request events since ${since}.` }], details: { display: "audit: no matching events" } };
+    const text = [header.join(" | "), ...body.map((row) => row.join(" | "))].join("\n");
+    // Deep link into the Teleport Web UI audit log, same `/web/cluster/<cluster>/audit?search=`
+    // pattern `cli/tui.ts`'s `openAudit` uses — scoped to the top row's resource name (or user,
+    // if there's no resource name) so it's a search over the actual root-cause event, not just
+    // the whole log. The search is fuzzy text matching, not an exact-row permalink (audit events
+    // aren't individually addressable in the Web UI), so also hand back the exact SQL to re-run
+    // (`tctl audit query exec`) in case the search doesn't land on the same row.
+    const cluster = (self.proxy ?? process.env.TELEPORT_PROXY ?? "flat-pine.beams.sh:443").replace(/:\d+$/, "");
+    const nameIdx = header.indexOf("resource_name");
+    const userIdx = header.indexOf("user");
+    const term = (nameIdx >= 0 && body[0][nameIdx]) || (userIdx >= 0 && body[0][userIdx]) || undefined;
+    const auditUrl = `https://${cluster}/web/cluster/${cluster}/audit${term ? `?search=${encodeURIComponent(term)}` : ""}`;
+    const footer = `\n\naudit log: ${auditUrl}\nexact query: tctl audit query exec ${JSON.stringify(sql)} --days=${auditDays(sinceMs)} --format=json --identity <bot identity> --auth-server ${self.proxy ?? "flat-pine.beams.sh:443"}`;
+    return {
+      content: [{ type: "text", text: text + footer }],
+      details: { display: `audit: ${body.length} matching event(s) since ${since}`, rows: body.length, auditUrl },
+    };
   },
 };
 
@@ -313,7 +395,7 @@ const submitForApprovalTool: AgentTool<any> = {
     if (revision === 0) return { content: [{ type: "text", text: "no change request file written yet" }], details: { error: true } };
     if (!self.alias || !self.owner) return { content: [{ type: "text", text: "self.json (beam alias, owner) missing; cannot submit from here" }], details: { error: true } };
     submitProgress = { step: 0 };
-    const r = await run(["bash", join(OUT, "..", "submit-cr.sh"), OUT, self.alias, self.owner, self.kubeCluster ?? "oncall"], 15 * 60_000, true, (l) => {
+    const r = await run(["bash", join(OUT, "..", "submit-cr.sh"), OUT, self.alias, self.owner, self.kubeCluster ?? "emailpals-production"], 15 * 60_000, true, (l) => {
       if (!l.startsWith("▶")) return;
       trackSubmit(l);
       emit("note", l);
@@ -355,7 +437,7 @@ const agent = new Agent({
     systemPrompt,
     model,
     thinkingLevel: args.thinking as any,
-    tools: [kubectlTool, submitTool, confirmTool, concludeTool, readTool, submitForApprovalTool, connectExecutorTool, ...executorTools],
+    tools: [kubectlTool, auditTool, submitTool, confirmTool, concludeTool, readTool, submitForApprovalTool, connectExecutorTool, ...executorTools],
     messages: [],
   },
   streamFn: models.streamSimple.bind(models),
@@ -430,7 +512,8 @@ const http = createServer(async (req: IncomingMessage, res: ServerResponse) => {
   try {
     const header = args["insecure-caller"] || !proxyHost ? req.headers["x-debug-caller"] : req.headers["teleport-jwt-assertion"];
     const caller = await verifier.verify(Array.isArray(header) ? header[0] : header);
-    if (self.owner && caller.username !== self.owner) return json(res, 403, { error: `only ${self.owner} may drive this investigation` });
+    if (self.owner && caller.username !== self.owner && caller.username !== TRUSTED_BOT_USERNAME)
+      return json(res, 403, { error: `only ${self.owner} may drive this investigation` });
   } catch (e) {
     return json(res, 401, { error: (e as Error).message });
   }

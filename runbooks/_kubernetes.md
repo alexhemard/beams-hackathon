@@ -4,10 +4,19 @@ General runbook, always loaded. Alert-specific runbooks add to it.
 
 ## Tools
 
-You have one tool for the cluster: `kubectl`, read-only, bound to the affected cluster. Allowed
-subcommands: `get`, `describe`, `logs`, `top`, `explain`, `api-resources`, `rollout status`,
-`rollout history`. Pass arguments as one string (`-n emailpals get pods -o wide`). Never pass
-`--kubeconfig` or `--raw`. No pipes: use `--sort-by`, `-o wide`, `-o jsonpath`, `--tail`.
+You have two tools: `kubectl`, read-only, bound to the affected cluster, and `audit_find_change`,
+which searches Teleport's audit log instead of the cluster.
+
+`kubectl` allowed subcommands: `get`, `describe`, `logs`, `top`, `explain`, `api-resources`,
+`rollout status`, `rollout history`. Pass arguments as one string (`-n emailpals get pods -o
+wide`). Never pass `--kubeconfig` or `--raw`. No pipes: use `--sort-by`, `-o wide`, `-o jsonpath`,
+`--tail`.
+
+`audit_find_change` answers "who did this" when `kubectl` shows a resource changed recently (a
+new rollout, an edited deployment/configmap/secret) but not who changed it: every Kubernetes API
+write Teleport proxied is a `kube.request` audit event, attributed to the human user or bot
+identity that made it. Narrow with `namespace`/`resourceKind`/`resourceName` from what `kubectl`
+already showed you, and `sinceMinutes` if the default window (since the alert fired) is wrong.
 
 ## Investigating
 

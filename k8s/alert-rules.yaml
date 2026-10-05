@@ -1,6 +1,6 @@
 # Demo alert that fires fast. The stock kube-prometheus-stack rules
 # (KubePodCrashLooping, KubeDeploymentReplicasMismatch) use `for: 15m`, too slow for a
-# demo. `release: monitoring` matches the Prometheus ruleSelector installed by demo/up.sh.
+# demo. `release: monitoring` matches the Prometheus ruleSelector installed by demo/kubeup.sh.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:

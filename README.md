@@ -13,14 +13,14 @@ tenant `flat-pine.beams.sh`). See `PLAN.md` for the why and the findings.
 ```
 laptop: oncall (TUI)                    beams                                             Teleport
   [1] Alerts        ── i ──▶  investigation beam: read-only bot + pi agent + kubectl    ──▶ kube.request (read) as bot-cr-inv-*
-  [2] Investigations── s ──▶  1. executor beam: per-CR bot + cr-exec (MCP over HTTPS app)
+  [2] Investigations── s ──▶  1. executor beam: per-CR bot + plan-runner (MCP over HTTPS app)
                               2. CR filed as Access Request (reason = CR YAML + executor: bot/beam/app) ──▶ access_request.create
   [3] Change Requests  a ──▶  reviewer approves that executor                            ──▶ access_request.review
-  [2] Investigations n v b ▶  investigator calls exec / verify / rollback on its executor  ──▶ app.session.* (beam → cr-exec), kube.request (write) as bot-cr-*
+  [2] Investigations n v b ▶  investigator calls exec / verify / rollback on its executor  ──▶ app.session.* (beam → plan-runner), kube.request (write) as bot-administrator-*
                      x ────▶  teardown: executor (beam, bot, token) then investigator (beam, bot); the Access Request stays
 ```
 
-Demo target: **E-mail Pals** on a kind cluster enrolled in the tenant: `emailpals-web` (the site from
+Demo target: **E-mail Pals** on an EKS cluster enrolled in the tenant: `emailpals-web` (the site from
 github.com/alexhemard/email-pals, also published through Teleport as app `emailpals-web`) and
 `emailpals-api`, namespace `emailpals`. The page polls the API through nginx (`/api/`) every 3s and
 shows `emailpals: online`, or an under-construction gif with a flashing SYSTEM IS DOWN banner when the
@@ -33,7 +33,7 @@ or type in the tmux tab); the Investigations row says "revision proposed" while 
 
 ## Vocabulary
 
-- **Draft**: the change request as a file, `cr.yaml` in the investigator's beam (pulled to `~/.cr/draft-*.yaml`). Editable, revisable, not yet in Teleport.
+- **Draft**: the change request as a file, `cr.yaml` in the investigator's beam (pulled to `~/.oncall/draft-*.yaml`). Editable, revisable, not yet in Teleport.
 - **Change request**: the draft once *filed*: a Teleport **Access Request** for the `oncall-change` role whose reason carries the CR YAML plus the `executor:` block. There is no separate resource; the Access Request is the change request, and its state (PENDING, APPROVED, DENIED) is Teleport's.
 - **Executor**: the beam, per-change bot and published app registered for that request before it is filed; its progress (READY, IN PROGRESS, COMPLETE…) is the executor's, not Teleport's. The investigator that registered it owns it and is the one that calls it.
 - **Torn down**: the investigation's beams and bots are gone (executor and investigator). The Access Request remains as the approval record, the audit log as the record of what ran.
@@ -47,22 +47,31 @@ or type in the tmux tab); the Investigations row says "revision proposed" while 
 | `cli/ops.ts`, `cli/investigate.ts`, `cli/beamops.ts` | The actions, and the beam/bot plumbing (bots, bound-keypair tokens, `tsh beams add/exec/scp/publish`). |
 | `investigator/` | The investigation agent (pi-agent-core; read-only kubectl tool; `submit_change_request`; HTTP API for the TUI), its in-beam bootstrap, the tmux runner, a mock kubectl for testing without a cluster. |
 | `cli/appproxy.ts` | Pooled `tsh proxy app` connections to published beam apps (the investigator's API). |
-| `cr-exec/` | The executor: MCP over streamable HTTP, approval gate polling the Access Request, phase state machine, command exec, in-beam `bootstrap.sh`. |
+| `plan-runner/` | The executor: MCP over streamable HTTP, approval gate polling the Access Request, phase state machine, command exec, in-beam `bootstrap.sh`. |
 | `investigator/prompt.md` | The investigator's system prompt, in Markdown: how to investigate, the CR format, how to work with the operator. Edit freely; copied into the beam per investigation. |
 | `runbooks/` | Markdown runbooks fed to the investigator by alert name (`{{runbook}}` in the prompt). |
 | `shared/` | CR schema (zod), YAML/argv parsing, tsh/tctl helpers, Alertmanager reader. |
-| `terraform/` | Roles (`cr-requester`, `oncall-change`, `oncall-reviewer`, `cr-executor`, `cr-investigator`), reviewer user, kube-agent join token. |
-| `k8s/`, `demo/` | E-mail Pals deployments (`emailpals-web` served from ConfigMaps of `k8s/emailpals-web/site`, `emailpals-api`), RBAC, alert rule; `up.sh`, `break.sh`, `reset.sh`, `approve.sh`; sample alert; local smoke CRs. |
+| `terraform/` | Roles (`operator` — also used by investigation bots, `oncall-change`, `webmaster`, `administrator` — also used by the cluster-setup bot), reviewer user, kube-agent join token. |
+| `k8s/`, `demo/` | E-mail Pals deployments (`emailpals-web` served from ConfigMaps of `k8s/emailpals-web/site`, `emailpals-api`), RBAC, alert rule; `kubeup.sh`, `break.sh`, `reset.sh`, `lib-teleport-admin.sh`, `approve.sh`, `bootstrap-beam.sh`; sample alert; local smoke CRs. |
 
 ## Setup (once)
 
 ```sh
 tsh login --proxy=flat-pine.beams.sh:443 --user=alex.hemard@goteleport.com
 npm install
+export AWS_PROFILE=...                       # or AWS_ACCESS_KEY_ID/SECRET/SESSION_TOKEN; real billable AWS resources
 (cd terraform && eval "$(tctl terraform env)" && terraform init && terraform apply)
-tctl users reset cr-reviewer                 # reviewer's password + MFA via the link
-brew install kind && demo/up.sh              # kind + kube-prometheus-stack + emailpals-api + Teleport kube agent
+tctl users reset webmaster                 # reviewer's password + MFA via the link
+# one-time, from an AWS CloudShell VPC environment (terraform output bootstrap_kube_agent_cloudshell
+# has the values to pick): upload/run terraform/bootstrap-kube-agent.sh — installs the kube agent +
+# RBAC with no public endpoint exposure. See terraform/README.md.
+demo/kubeup.sh                           # kube-prometheus-stack + emailpals-api/web + publishes emailpals-web, all through Teleport
 ```
+
+Running the TUI from inside a beam instead of your laptop: sync this repo into the beam, then
+`demo/bootstrap-beam.sh` (installs `kubectl` if missing, `tsh kube login`, `npm install`), then
+`npx tsx cli/oncall.ts`. Alertmanager access needs nothing beam-specific — see
+`demo/bootstrap-beam.sh`'s header comment.
 
 ## Demo
 
@@ -73,7 +82,7 @@ npx tsx cli/oncall.ts    # the TUI
 
 In the TUI: select the alert, **i** to investigate (watch live, or attach with the
 printed `tsh beams ssh …` + `tmux attach -t investigate`) → in Investigations, **t** / **c** / **l**
-show the transcript, the draft, or the log; **s** submits: this first registers the executor (beam, per-CR bot, cr-exec
+show the transcript, the draft, or the log; **s** submits: this first registers the executor (beam, per-CR bot, plan-runner
 published as an app) and then files the Access Request whose reason is the CR plus an
 `executor:` block naming that bot, beam and app. The reviewer approves a concrete, registered
 executor: in Change Requests, **a** approves / **d** denies (that tab stands in for a Teleport
@@ -104,12 +113,19 @@ reflect it, or after a timeout with a warning. On startup intents are dropped an
 **The investigator submits, too.** **s** on an investigation asks the agent to submit: `submit_for_approval`
 runs `investigator/submit-cr.sh` inside its beam, which creates the executor beam, the per-change bot and
 one-time token (`tctl` works in a beam with `--identity $TELEPORT_IDENTITY_FILE --auth-server`), ships one
-archive (cr-exec bundle, bootstrap, `cr.yaml`), bootstraps, publishes, files the Access Request with the
+archive (plan-runner bundle, bootstrap, `cr.yaml`), bootstraps, publishes, files the Access Request with the
 `executor:` block, and labels the bot with the request id, app and `oncall/parent-beam`. The laptop only
 watches Teleport: the request and the labeled bot appear on the next refresh and are linked back to the
 investigation by that parent label. The agent then attaches the executor's MCP tools as `executor_*`
 (`connect_executor`), with the server's own schemas; `executor_exec` etc. return an error until approval.
 `oncall submit` remains as the laptop-side path.
+
+**Multi-cluster.** Alerts are fetched from every kube cluster your Teleport identity can see
+(`tsh kube ls`), not one fixed cluster — no config required. Each cluster's kube-prometheus-stack
+tags its own alerts with a `cluster` label (`prometheus.prometheusSpec.externalLabels.cluster` in
+`demo/kubeup.sh`), shown as a `[cluster]` prefix in the Alerts list; investigating an alert routes
+that investigation's beam and bot to the alert's own cluster, not a global default. Set
+`kube_cluster` in `~/.oncallrc` to pin the TUI to one cluster instead.
 
 **Silencing alerts.** Alertmanager cannot "resolve" an alert Prometheus still fires; the on-call action
 is a silence. **m** on an alert posts one (`POST /api/v2/silences` through the kube service proxy, so
@@ -126,10 +142,10 @@ can be asserted; the TUI marks such steps "verify: no-op" so the reviewer sees i
 more than 30 minutes ago leave the list (`hide_closed_after` in `~/.oncallrc`, 0 keeps everything); **H** shows them again.
 The list badge is the Access Request's own state (PENDING, APPROVED, DENIED); the executor's state is in Investigations.
 
-**Approving from the CR tab.** **a** approves and **d** denies as the human reviewer (`cr-reviewer` by
+**Approving from the CR tab.** **a** approves and **d** denies as the human reviewer (`webmaster` by
 default, `reviewer:` in `~/.oncallrc`) through a second tsh profile (`~/.tsh-reviewer`); you type the
 review reason on the bottom line. The first time, the TUI suspends for the reviewer's `tsh login`
-(password + MFA). One-time setup: `tctl users reset cr-reviewer` prints the link that sets the password.
+(password + MFA). One-time setup: `tctl users reset webmaster` prints the link that sets the password.
 `demo/approve.sh` (Machine ID bot reviewer) remains as a shortcut.
 
 **The investigator runs the approved change.** Once the request is APPROVED, **n** / **v** / **b** / **r**
@@ -153,7 +169,7 @@ while they have work outstanding. No marker parsing, no terminal scraping: the a
 
 **The draft is a file, and the investigation is a conversation.** The investigator writes the CR to
 `/home/beams/investigate/cr.yaml` in its beam and then stays alive; `/state` carries the file, and the
-TUI mirrors it to `~/.cr/draft-*.yaml`. In Investigations: **p** sends a message to the investigator
+TUI mirrors it to `~/.oncall/draft-*.yaml`. In Investigations: **p** sends a message to the investigator
 ("check the ConfigMap too", "make step 2 also scale to 2"); its reply streams into the transcript and any
 revised CR replaces the file. **A** attaches to the agent's tmux window, where you can type directly.
 **e** opens the draft in your editor (TUI suspended), validates it, and sends it to the agent so it reads
@@ -168,7 +184,7 @@ background (every 5s while an operation is pending) and its state shown in the `
 WAITING FOR APPROVAL → READY (approved, nothing run yet) → IN PROGRESS n/m → RUNNING step.kind (a command
 is executing) → COMPLETE, or FAILED → ROLLING BACK → ROLLED BACK, ABORTED; TORN DOWN once **x** removed it,
 GONE if its beam vanished. The Access Request's state (PENDING / APPROVED / DENIED) is shown next to it, as
-Teleport's. An executor whose investigation row is missing (filed from the CLI, or a lost `~/.cr`) gets a
+Teleport's. An executor whose investigation row is missing (filed from the CLI, or a lost `~/.oncall`) gets a
 row marked "investigator gone" so it can still be torn down.
 
 **What completes a change request.** The CR carries an `alert:` block (name + Alertmanager
@@ -179,21 +195,21 @@ which revokes the escalated identity. The Access Request stays as the approval r
 bot's actions are the audit record. Teleport itself has no completion state for a request.
 
 Order matters: the request can only be approved for an executor that already exists, and
-cr-exec only honors a request whose steps are byte-identical to the ones it was deployed with.
+plan-runner only honors a request whose steps are byte-identical to the ones it was deployed with.
 A replaced executor means a new request.
 
 Approval must come from a second identity (self-review is refused, and `tctl requests approve`
 needs an `access_request:update` rule that `editor` lacks). Either the reviewer user, in another
 profile: `TELEPORT_HOME=~/.tsh-reviewer tsh --proxy flat-pine.beams.sh:443 request review --approve <id>`
-(one-time `tctl users reset cr-reviewer`), or the demo shortcut `demo/approve.sh [<id>]`: it shows the
+(one-time `tctl users reset webmaster`), or the demo shortcut `demo/approve.sh [<id>]`: it shows the
 queue with `tctl requests ls`, the request with `tctl requests get` (plus the CR unescaped), asks y/N,
-then mints a short-lived identity for the Machine ID bot `cr-reviewer-bot` (role `oncall-reviewer`) and
+then mints a short-lived identity for the Machine ID bot `webmaster-bot` (role `webmaster`) and
 reviews with `tsh request review`. `--deny` denies, `-y` skips the prompt.
 
 **How a beam is set up.** Each beam gets one archive: the files it needs, staged under their target
-paths and extracted at `/home/beams` (`init-<name>.tgz` stays in `~/.cr` as the record of that initial
+paths and extracted at `/home/beams` (`init-<name>.tgz` stays in `~/.oncall` as the record of that initial
 state). For an investigation that is the agent bundle, `prompt.md`, the runbooks, the alert, the scripts
-and your terminfo; for an executor, the cr-exec bundle, its bootstrap and the CR file. Then one script
+and your terminfo; for an executor, the plan-runner bundle, its bootstrap and the CR file. Then one script
 runs per phase.
 
 **The investigation is a recorded Teleport session.** The agent prints its whole conversation, including
@@ -204,7 +220,7 @@ it). tmux is only this: the recordable, attachable copy of the transcript. Every
 agent prints, and everything said to it, is then a session recording: `tsh play <sid>`, the Web UI
 player, and, with the `inference_policy` in `teleport/inference_policy.yaml` (kind ssh → the tenant's
 `teleport-cloud-default` model), a Teleport session summary. `q` and **x** end the recording cleanly. The
-executor is an HTTP app, not a session, so `oncall close` writes its own `~/.cr/<id>.summary.md` from the
+executor is an HTTP app, not a session, so `oncall close` writes its own `~/.oncall/<id>.summary.md` from the
 executor's log: identity, window, each command with exit code and duration, RBAC denials, audit pointers.
 
 **Attaching to an investigation.** `tsh beams ssh <beam>` is the whole command: the beam's
@@ -222,8 +238,8 @@ with `tic -x` into `~/.terminfo`; tmux then works with your TERM as is.
 Same thing step by step from the shell:
 
 ```sh
-npx tsx cli/oncall.ts investigate demo/alert-crashloop.json        # -> ~/.cr/draft-*.yaml, beam kept for tmux attach
-npx tsx cli/oncall.ts submit ~/.cr/draft-KubePodCrashLooping-xxxx.yaml   # registers the executor, THEN files the request
+npx tsx cli/oncall.ts investigate demo/alert-crashloop.json        # -> ~/.oncall/draft-*.yaml, beam kept for tmux attach
+npx tsx cli/oncall.ts submit ~/.oncall/draft-KubePodCrashLooping-xxxx.yaml   # registers the executor, THEN files the request
 npx tsx cli/oncall.ts exec-status <id>                              # approved=false, available=[]
 npx tsx cli/oncall.ts exec <id>                                     # error: not approved: access request … is PENDING
 # reviewer approves <id>
@@ -240,9 +256,9 @@ executor's kubectl steps will fail on the mock, which exercises the rollback pat
 ## Local smoke test of the executor (no Teleport)
 
 ```sh
-npx tsx cr-exec/server.ts --cr dev --insecure-cr-file demo/cr-dev-fail.yaml --insecure-caller-header --allow true,false,echo --auto
+npx tsx plan-runner/server.ts --cr dev --insecure-cr-file demo/cr-dev-fail.yaml --insecure-caller-header --allow true,false,echo --auto
 # or serve and drive it step by step:
-npx tsx cr-exec/server.ts --cr dev --insecure-cr-file demo/cr-dev-ok.yaml --insecure-caller-header --allow true,false,echo &
+npx tsx plan-runner/server.ts --cr dev --insecure-cr-file demo/cr-dev-ok.yaml --insecure-caller-header --allow true,false,echo &
 npx tsx cli/oncall.ts exec dev --url http://127.0.0.1:8080/mcp
 ```
 
@@ -262,7 +278,7 @@ The prompt (`investigator/prompt.md`) is platform-neutral: how to investigate, w
 how to work with the operator. Platform specifics live in runbooks: `runbooks/_*.md` are general and
 always loaded (`_kubernetes.md` here), `runbooks/<alert>.md` is the alert's, `_default.md` the fallback.
 
-## What cr-exec enforces
+## What plan-runner enforces
 
 - Loads the CR from the Access Request through the bot identity (readable while PENDING). The request must be
   APPROVED and unexpired for `exec` / `verify` / `rollback` to do anything; re-checked per call and polled every 10s.
@@ -290,24 +306,24 @@ oncall/app: the published executor app, added after publish
 ```
 
 This mirrors how the beam service labels each beam's own system bot. `tctl get bots` plus
-`tsh beams ls` rebuilds the whole picture; `~/.cr/` is only a cache, and the TUI,
+`tsh beams ls` rebuilds the whole picture; `~/.oncall/` is only a cache, and the TUI,
 `oncall exec-status`, and `oncall teardown` fall back to Teleport when it is missing. Every
 Kubernetes write carries the bot name, so an audit event ties back bot → beam → CR → owner.
 
 ## What the audit log shows for one change request
 
 Everything below is a native Teleport event; **w** in the TUI opens the Web UI audit log searched for the
-executor bot (`/web/cluster/<cluster>/audit?search=cr-<run>`). In order, for one CR:
+executor bot (`/web/cluster/<cluster>/audit?search=administrator-<run>`). In order, for one CR:
 
 | Event | Who | What it proves |
 |---|---|---|
-| `bot.create` | requester | the on-call minted a dedicated identity `cr-<run>` for this change |
-| `session.start` / `exec` / `sftp` on node `beam-<uuid>` | requester | every bootstrap command and file (`cr.yaml`, cr-exec bundle) sent to the executor beam; node labels carry the beam alias and owner |
-| `join_token.bound_keypair.recovery`, `bot.join` (bound_keypair, from the beam's IP), `cert.create` roles `[cr-executor]` | bot | the identity was bound to that beam once and can't be replayed |
+| `bot.create` | requester | the on-call minted a dedicated identity `administrator-<run>` for this change |
+| `session.start` / `exec` / `sftp` on node `beam-<uuid>` | requester | every bootstrap command and file (`cr.yaml`, plan-runner bundle) sent to the executor beam; node labels carry the beam alias and owner |
+| `join_token.bound_keypair.recovery`, `bot.join` (bound_keypair, from the beam's IP), `cert.create` roles `[administrator]` | bot | the identity was bound to that beam once and can't be replayed |
 | `access_request.create` (reason = the CR YAML, incl. `executor:` bot/beam/app) | requester | the plan as filed, naming the executor that will run it |
 | `access_request.review` state APPROVED | reviewer | who approved, with reason |
 | `app.session.start` app `<beam>-<id4>` | requester | the operator reached the executor (each `exec`/`verify`/`rollback` is a request on this session) |
-| `kube.request` PATCH/GET on the deployment, user `bot-cr-<run>`, groups `[oncall-fix]`, response 200 | bot | the change itself, attributed to the per-CR identity, with cluster, path, verb and status |
+| `kube.request` PATCH/GET on the deployment, user `bot-administrator-<run>`, groups `[webmaster]`, response 200 | bot | the change itself, attributed to the per-CR identity, with cluster, path, verb and status |
 | `bot.delete` | requester | close: the identity is gone |
 
 Investigations leave the same shape with `cr-inv-*` bots, `kube.request` GETs only, and an
@@ -318,8 +334,8 @@ Gaps observed (18.11):
 - Beam create / publish / delete are not audit events; the beam shows up only as an SSH node with
   `teleport.internal/beams/*` labels.
 - **The commands themselves are not in Teleport's log.** The plan is (the request reason), and the effects
-  are (`kube.request` PATCH/GET as the bot), but the exact argv cr-exec ran is only in cr-exec's own log.
-  `oncall close` copies that log out of the beam to `~/.cr/<request-id>.exec.log` before the beam is
+  are (`kube.request` PATCH/GET as the bot), but the exact argv plan-runner ran is only in plan-runner's own log.
+  `oncall close` copies that log out of the beam to `~/.oncall/<request-id>.exec.log` before the beam is
   removed (JSON lines: request id, step, argv, caller, exit code, duration).
 - Teleport's MCP app type would put every tool call in the log as `mcp.session.request` (JSON-RPC method
   and params), so `exec {step}` would be audited by name. It is not usable here for the *server* side:
@@ -330,15 +346,15 @@ Gaps observed (18.11):
   this tenant.
 - Nothing links `kube.request` by the bot to the Access Request except the bot name in the request's
   `executor:` block.
-- The reviewer in the demo is a bot unless the `cr-reviewer` user's login is completed.
+- The reviewer in the demo is a bot unless the `webmaster` user's login is completed.
 
 ## Known limits (facts, not proposals)
 
 - A beam's own identity cannot reissue certs, so escalated (and read-only) identities are second tbot/bot processes inside the
   beam, the workaround the Beams team recommends. Delegation V2 (core#536, RFD 0329) is the native path.
-- MCP-subkind apps are unreachable from beams today; cr-exec is a plain HTTP app serving MCP over HTTPS.
-- Writes are attributed to `bot-cr-<id8>`, correlated to you by name and by the request id in cr-exec's log.
-- Access Requests have no completion state; the CR's progress lives in cr-exec (and `~/.cr/`). Done = executor torn down.
+- MCP-subkind apps are unreachable from beams today; plan-runner is a plain HTTP app serving MCP over HTTPS.
+- Writes are attributed to `bot-administrator-<id8>`, correlated to you by name and by the request id in plan-runner's log.
+- Access Requests have no completion state; the CR's progress lives in plan-runner (and `~/.oncall/`). Done = executor torn down.
 - Alertmanager is read through the Kubernetes API server's service proxy. In Teleport's v8 `kubernetes_resources`
   that path is a distinct verb: `{kind: services, api_group: "", verbs: [get, proxy]}`; plain `get/list/watch` on `*` does not cover it.
 - Long-running executor steps (e.g. `rollout status --timeout=90s`) exceed the MCP SDK's default 60s client timeout; the CLI/TUI use 15 minutes.

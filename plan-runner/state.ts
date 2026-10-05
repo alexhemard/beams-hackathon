@@ -1,4 +1,4 @@
-// CR execution state machine. Owned by cr-exec, never by the caller.
+// CR execution state machine. Owned by plan-runner, never by the caller.
 //
 // The caller gets four fixed operations; the server decides which step they
 // apply to and enforces order, one-shot execution, and phases:

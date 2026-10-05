@@ -9,9 +9,9 @@
   },
   "scripts": {
     "oncall": "tsx cli/oncall.ts",
-    "cr-exec": "tsx cr-exec/server.ts",
+    "plan-runner": "tsx plan-runner/server.ts",
     "typecheck": "tsc --noEmit",
-    "bundle:cr-exec": "esbuild cr-exec/server.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/cr-exec.mjs --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\"",
+    "bundle:plan-runner": "esbuild plan-runner/server.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/plan-runner.mjs --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\"",
     "bundle:investigate": "esbuild investigator/agent.ts --bundle --loader:.md=text --platform=node --target=node22 --format=esm --outfile=dist/investigate.mjs --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\""
   },
   "dependencies": {

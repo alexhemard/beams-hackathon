@@ -1,7 +1,7 @@
 // Reviewing a change request as a human reviewer, from the TUI.
 //
-// Teleport refuses self-review, so approval comes from a second local user (`cr-reviewer`, role
-// oncall-reviewer, created by terraform) through its own tsh profile (~/.tsh-reviewer). The first
+// Teleport refuses self-review, so approval comes from a second local user (`webmaster`, role
+// webmaster, created by terraform) through its own tsh profile (~/.tsh-reviewer). The first
 // time, the TUI suspends and runs the reviewer's `tsh login` interactively; after that reviews are
 // one `tsh request review`. `tctl users reset <user>` prints the link that sets the password.
 
@@ -12,7 +12,7 @@ import { config } from "./config";
 import { run, runOk } from "../shared/teleport";
 
 const PROXY = process.env.CR_PROXY ?? "flat-pine.beams.sh:443";
-export const REVIEWER = config.reviewer ?? process.env.CR_REVIEWER ?? "cr-reviewer";
+export const REVIEWER = config.reviewer ?? process.env.CR_REVIEWER ?? "webmaster";
 export const REVIEWER_HOME = config.reviewer_home ?? process.env.CR_REVIEWER_HOME ?? join(homedir(), ".tsh-reviewer");
 
 function env() {
@@ -57,6 +57,6 @@ export async function reviewRequest(id: string, decision: "approve" | "deny", re
 
 /** The password-reset link for the reviewer (for first-time setup). */
 export async function reviewerResetLink(): Promise<string> {
-  const out = await runOk(["tctl", "users", "reset", REVIEWER], { echo: false });
+  const out = await runOk(["tctl", "users", "reset", REVIEWER, "--auth-server", PROXY], { echo: false });
   return out.match(/https?:\/\/\S+/)?.[0] ?? out.trim();
 }

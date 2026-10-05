@@ -1,0 +1,29 @@
+# mutagen project file (https://mutagen.io/documentation/orchestration/projects)
+# With no sessions listed, bmx syncs this folder to the beam's work directory.
+# Sessions use beam:<path> for the beam side, relative to its home directory:
+#   home:
+#     alpha: .
+#     beta: beam:.
+#   dist:
+#     alpha: beam:work/app/dist
+#     beta: ./dist
+#     mode: one-way-replica
+# Version control stays on this machine: .git is not synced (ignore.vcs), see
+# https://mutagen.io/documentation/synchronization/version-control-systems/
+sync:
+  defaults:
+    mode: two-way-resolved
+    ignore:
+      vcs: true
+      paths:
+        - "node_modules"
+        - "dist"
+        - "build"
+        - "target"
+        - ".venv"
+        - "__pycache__"
+        - "node_modules/*"
+        - "*.terraform*"
+        - "terraform.tfstate*"
+        - "*.tfvars"
+        - "*~"

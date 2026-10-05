@@ -2,10 +2,10 @@
 // Every step emits human-readable lines through `emit` (stdout by default).
 //
 // Order of operations (register, then request, then approval):
-//   submit   = deploy the executor (beam + labeled bot + cr-exec + published app) and
+//   submit   = deploy the executor (beam + labeled bot + plan-runner + published app) and
 //              THEN file the Access Request whose reason is the CR plus an `executor:`
 //              block naming that bot/beam/app. The reviewer approves a concrete, registered
-//              executor. cr-exec discovers its request by that block; exec/verify/rollback
+//              executor. plan-runner discovers its request by that block; exec/verify/rollback
 //              error until it is APPROVED and the steps match what it was deployed with.
 //   exec / verify / rollback / status  one operation at a time on the executor
 //   teardown  remove beam, bot, token
@@ -19,8 +19,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { parseCR, serializeCR, validateChangeSemantics, validateCommands, STATUS_TOOL, toolName, type CR, type Operation } from "../shared/cr";
 import { getRequest, listRequests, run, runOk, type AccessRequest } from "../shared/teleport";
+import { retryWithBackoff } from "./retry";
 import {
-  PROXY, REPO, addBotLabels, beamExec, beamExecOk, beamInit, beamScp, bundle, createBeam, createBoundKeypairToken, currentUser, discover,
+  PROXY, REPO, addBotLabels, ambientEnv, botAppEnv, beamExec, beamExecOk, beamInit, beamScp, bundle, createBeam, createBoundKeypairToken, currentUser, discover,
   ensureBot, listBeams, publishedAppName, removeBeam, removeBot, stateDir, step as stepLog, type BotLabels, type TrackedBot,
  beamScpFrom } from "./beamops";
 
@@ -29,8 +30,8 @@ export type { TrackedBot };
 export { discover };
 
 export const APPROVAL_ROLE = process.env.CR_APPROVAL_ROLE ?? "oncall-change";
-export const BOT_ROLE = process.env.CR_BOT_ROLE ?? "cr-executor";
-export const KUBE_CLUSTER = process.env.CR_KUBE_CLUSTER ?? "oncall";
+export const BOT_ROLE = process.env.CR_BOT_ROLE ?? "administrator";
+export const KUBE_CLUSTER = process.env.CR_KUBE_CLUSTER ?? "emailpals-production";
 export const ALLOW: Record<string, string[]> = { kube: ["kubectl"], tctl: ["tctl"] };
 
 export type Emit = (line: string) => void;
@@ -61,11 +62,11 @@ export async function submit(file: string, target: CRRun["target"], emit: Emit =
   validateChangeSemantics(cr);
   const owner = await currentUser();
   const runId = randomBytes(3).toString("hex");
-  const bot = `cr-${runId}`;
+  const bot = `administrator-${runId}`;
   const st: CRRun = { requestId: "", target, bot, token: bot };
 
-  stepLog(`bundle cr-exec`);
-  await bundle("bundle:cr-exec");
+  stepLog(`bundle plan-runner`);
+  await bundle("bundle:plan-runner");
 
   stepLog(`create executor beam`);
   const beam = await createBeam();
@@ -79,31 +80,31 @@ export async function submit(file: string, target: CRRun["target"], emit: Emit =
   await ensureBot(bot, BOT_ROLE, labels);
   const secret = await createBoundKeypairToken(bot, bot, labels);
 
-  stepLog(`copy cr-exec and the change request into beam ${beam.id}`);
+  stepLog(`copy plan-runner and the change request into beam ${beam.id}`);
   const crFile = join(stateDir(), `cr-${runId}.yaml`);
   writeFileSync(crFile, serializeCR(cr));
   // one archive = the executor's reproducible init state (bundle, bootstrap, the CR file)
   await beamInit(
     beam.id,
     [
-      { local: join(REPO, "dist/cr-exec.mjs"), remote: "cr-exec/cr-exec.mjs" },
-      { local: join(REPO, "cr-exec/bootstrap.sh"), remote: "cr-exec/bootstrap.sh" },
-      { local: crFile, remote: "cr-exec/cr.yaml" },
+      { local: join(REPO, "dist/plan-runner.mjs"), remote: "plan-runner/plan-runner.mjs" },
+      { local: join(REPO, "plan-runner/bootstrap.sh"), remote: "plan-runner/bootstrap.sh" },
+      { local: crFile, remote: "plan-runner/cr.yaml" },
     ],
     bot,
   );
 
-  stepLog(`bootstrap inside beam: enroll bot, start tbot, start cr-exec (no tools until approved)`);
+  stepLog(`bootstrap inside beam: enroll bot, start tbot, start plan-runner (no tools until approved)`);
   const boot = await beamExec(
     beam.id,
-    ["env", `KUBE_CLUSTER=${KUBE_CLUSTER}`, "bash", "/home/beams/cr-exec/bootstrap.sh", PROXY, bot, secret, bot, target, owner],
+    ["env", `KUBE_CLUSTER=${KUBE_CLUSTER}`, "bash", "/home/beams/plan-runner/bootstrap.sh", PROXY, bot, secret, bot, target, owner],
     { redact: [secret] },
   );
   for (const l of boot.stdout.split("\n")) if (l.trim()) emit(l);
   if (boot.code !== 0) throw new Error(`bootstrap failed:\n${boot.stderr}`);
 
-  stepLog(`publish cr-exec as a Teleport app`);
-  const pub = await runOk(["tsh", "--proxy", PROXY, "beams", "publish", beam.id]);
+  stepLog(`publish plan-runner as a Teleport app`);
+  const pub = await runOk(["tsh", "--proxy", PROXY, "beams", "publish", beam.id], { env: ambientEnv() });
   st.appUrl = pub.match(/https:\/\/\S+/)?.[0];
   st.appName = st.appUrl ? new URL(st.appUrl).hostname.split(".")[0] : publishedAppName(beam);
   stepLog(`published app ${st.appName}`);
@@ -112,7 +113,7 @@ export async function submit(file: string, target: CRRun["target"], emit: Emit =
   stepLog(`file the change request as an Access Request naming this executor`);
   const withExecutor: CR = { ...cr, executor: { bot, beam: beam.id, app: st.appName!, owner } };
   const reason = serializeCR(withExecutor);
-  const out = await runOk(["tsh", "--proxy", PROXY, "request", "create", "--roles", APPROVAL_ROLE, "--reason", reason, "--nowait"]);
+  const out = await runOk(["tsh", "--proxy", PROXY, "request", "create", "--roles", APPROVAL_ROLE, "--reason", reason, "--nowait"], { env: ambientEnv() });
   const id = out.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)?.[0];
   if (!id) throw new Error(`could not find a request id in tsh output:\n${out}`);
   st.requestId = id;
@@ -152,7 +153,7 @@ export interface ExecutorStatus {
 
 export interface RunOptions {
   port?: number;
-  /** dev: direct URL to a local cr-exec */
+  /** dev: direct URL to a local plan-runner */
   url?: string;
   caller?: string;
 }
@@ -172,24 +173,40 @@ export async function withExecutor<T>(id: string, emit: Emit, o: RunOptions, fn:
   } else {
     const st = await stateFor(id);
     if (!st?.appName) throw new Error(`no executor known for ${id} (locally or in Teleport)`);
-    proxy = spawn("tsh", ["--proxy", PROXY, "proxy", "app", st.appName, "--port", String(port)], { stdio: ["ignore", "pipe", "pipe"] });
-    const p = proxy;
-    let exited: number | null | undefined;
-    p.on("exit", (c) => (exited = c ?? -1));
-    const onData = (d: Buffer) => {
-      const s = d.toString().trim();
-      if (s && !/listening|Proxying|127\.0\.0\.1/i.test(s)) emit(s);
-    };
-    p.stdout!.on("data", onData);
-    p.stderr!.on("data", onData);
-    // wait until the local proxy actually accepts connections (up to 20s)
+    const appName = st.appName;
+    // wait until the local proxy actually accepts connections (up to 20s overall)
     const deadline = Date.now() + 20_000;
-    for (;;) {
-      if (exited !== undefined) throw new Error(`tsh proxy app exited with ${exited}`);
-      if (await portOpen(port)) break;
-      if (Date.now() > deadline) throw new Error(`tsh proxy app on 127.0.0.1:${port} did not come up`);
-      await new Promise((r) => setTimeout(r, 250));
-    }
+    // A freshly published executor app can take a moment to propagate; `tsh proxy app` fails
+    // fast with "not found" until it does, so retry that specific failure within the deadline.
+    const attempt = (): Promise<string | undefined> =>
+      new Promise((resolve) => {
+        const p = spawn("tsh", ["--proxy", PROXY, "proxy", "app", appName, "--port", String(port)], { stdio: ["ignore", "pipe", "pipe"], env: botAppEnv() });
+        proxy = p;
+        let err = "";
+        let exited = false;
+        const onData = (d: Buffer) => {
+          const s = d.toString();
+          err += s;
+          const t = s.trim();
+          if (t && !/listening|Proxying|127\.0\.0\.1/i.test(t)) emit(t);
+        };
+        p.stdout!.on("data", onData);
+        p.stderr!.on("data", onData);
+        p.on("exit", () => (exited = true));
+        const poll = async () => {
+          for (;;) {
+            if (exited) return resolve(`tsh proxy app exited: ${err.trim().split("\n").pop() ?? ""}`);
+            if (await portOpen(port)) return resolve(undefined);
+            if (Date.now() > deadline) {
+              p.kill("SIGTERM");
+              return resolve(`tsh proxy app on 127.0.0.1:${port} did not come up`);
+            }
+            await new Promise((r) => setTimeout(r, 250));
+          }
+        };
+        poll();
+      });
+    await retryWithBackoff(attempt, deadline, (err) => /not found/i.test(err));
     mcpUrl = new URL(`http://127.0.0.1:${port}/mcp`);
   }
   try {
@@ -266,12 +283,12 @@ export async function teardown(id: string, emit: Emit = stdout): Promise<void> {
   const st = await stateFor(id);
   if (!st) throw new Error(`no executor known for ${id} (locally or in Teleport)`);
   if (st.beam) {
-    // The exact argv cr-exec ran lives only in its own log (Teleport audits the plan and the
+    // The exact argv plan-runner ran lives only in its own log (Teleport audits the plan and the
     // kube.request effects, not the commands). Keep it before the beam disappears.
     const logPath = join(stateDir(), `${id}.exec.log`);
     stepLog(`save executor log → ${logPath}`);
     try {
-      await beamScpFrom(st.beam, "/home/beams/logs/cr-exec.log", logPath);
+      await beamScpFrom(st.beam, "/home/beams/logs/plan-runner.log", logPath);
       emit(`executor log saved: ${logPath}`);
       const summaryPath = join(stateDir(), `${id}.summary.md`);
       writeFileSync(summaryPath, executionSummary(id, st, readFileSync(logPath, "utf8")));
