@@ -2,9 +2,9 @@
 
 An on-call TUI on your laptop. Alerts come from Alertmanager. Investigating an alert
 spins up a **read-only beam** running a pi agent that diagnoses with kubectl and drafts
-a **change request** (steps with run / rollback / verify). The CR is filed as a Teleport
-**Access Request**. An **executor beam** holding a per-CR bot identity runs a bespoke MCP
-server scoped to that one CR: four tools (`status`, `exec`, `verify`, `rollback`), and every
+a **change request** (steps with run / rollback / verify). The change request is filed as a Teleport
+**Access Request**. An **executor beam** holding a per-change-request bot identity runs a bespoke MCP
+server scoped to that one change request: four tools (`status`, `exec`, `verify`, `rollback`), and every
 call is checked against the request's approval and the change's execution state. The
 investigator owns that executor and drives it, one operation at a time, when the operator
 asks. Everything is in the Teleport audit log. Built entirely on shipped Teleport (18.11,
@@ -13,8 +13,8 @@ tenant `flat-pine.beams.sh`). See `PLAN.md` for the why and the findings.
 ```
 laptop: oncall (TUI)                    beams                                             Teleport
   [1] Alerts        ── i ──▶  investigation beam: read-only bot + pi agent + kubectl    ──▶ kube.request (read) as bot-cr-inv-*
-  [2] Investigations── s ──▶  1. executor beam: per-CR bot + plan-runner (MCP over HTTPS app)
-                              2. CR filed as Access Request (reason = CR YAML + executor: bot/beam/app) ──▶ access_request.create
+  [2] Investigations── s ──▶  1. executor beam: per-change-request bot + plan-runner (MCP over HTTPS app)
+                              2. change request filed as Access Request (reason = change-request YAML + executor: bot/beam/app) ──▶ access_request.create
   [3] Change Requests  a ──▶  reviewer approves that executor                            ──▶ access_request.review
   [2] Investigations n v b ▶  investigator calls exec / verify / rollback on its executor  ──▶ app.session.* (beam → plan-runner), kube.request (write) as bot-administrator-*
                      x ────▶  teardown: executor (beam, bot, token) then investigator (beam, bot); the Access Request stays
@@ -34,9 +34,87 @@ or type in the tmux tab); the Investigations row says "revision proposed" while 
 ## Vocabulary
 
 - **Draft**: the change request as a file, `cr.yaml` in the investigator's beam (pulled to `~/.oncall/draft-*.yaml`). Editable, revisable, not yet in Teleport.
-- **Change request**: the draft once *filed*: a Teleport **Access Request** for the `oncall-change` role whose reason carries the CR YAML plus the `executor:` block. There is no separate resource; the Access Request is the change request, and its state (PENDING, APPROVED, DENIED) is Teleport's.
+- **Change request**: the draft once *filed*: a Teleport **Access Request** for the `oncall-change` role whose reason carries the change-request YAML plus the `executor:` block. There is no separate resource; the Access Request is the change request, and its state (PENDING, APPROVED, DENIED) is Teleport's.
 - **Executor**: the beam, per-change bot and published app registered for that request before it is filed; its progress (READY, IN PROGRESS, COMPLETE…) is the executor's, not Teleport's. The investigator that registered it owns it and is the one that calls it.
 - **Torn down**: the investigation's beams and bots are gone (executor and investigator). The Access Request remains as the approval record, the audit log as the record of what ran.
+
+## Access flow
+
+Four identities, each with exactly the access its job needs — nothing is a standing superuser:
+
+- **You** (laptop, full `tsh login`): the TUI runs here. Role `operator` — may file change requests
+  and has read-only Kubernetes access to the demo cluster (alerts, status). Runs no agents; a client only.
+  Access Requests are always filed as you: Teleport bots cannot file Access Requests at all (confirmed
+  live — "can not request role", independent of what roles the bot holds), so the investigator files on
+  the beam's own (your) identity even though it drives the result.
+- **Investigation bot** (`cr-inv-<id>`, one per investigation): role `operator` too (same read-only
+  kube/audit access) plus `investigator-executor-access`, which grants nothing until the change request
+  it's acting on is approved.
+- **Executor bot** (`administrator-<run>`, one per change request): role `administrator` — full
+  kube-admin access to the demo cluster. Minted the moment the investigator *registers* the executor,
+  before approval; its Teleport privilege is standing from creation, not elevated by approval. Two
+  separate gates apply afterward: `plan-runner` itself re-checks the Access Request's APPROVED state on
+  every `exec`/`verify`/`rollback` call, and Teleport RBAC (`investigator-executor-access`) decides
+  whether the caller can even open a session to this app in the first place.
+- **Reviewer** (`cr-reviewer`, role `webmaster`, a separate human user): may approve/deny the
+  `oncall-change` Access Request. Self-review is Teleport-native and always refused here, since the
+  reviewer is never the requester.
+
+Request lifecycle, alert to resolution:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Firing
+
+    Firing --> Investigating : User starts investigation
+    note right of Investigating
+        InvestigatorBot: role operator
+        read-only kube RBAC, nothing else
+    end note
+
+    Investigating --> Draft : root cause found, change request written
+    Draft --> Draft : revised locally, not yet in Teleport
+
+    Draft --> Pending : InvestigatorBot files Access Request for role oncall-change, on behalf of User (bots can't file requests themselves)
+    note right of Pending
+        PlanRunnerBot already exists with full
+        kube-admin RBAC (role administrator),
+        but plan-runner itself refuses every
+        exec/verify/rollback call: request not APPROVED
+    end note
+
+    Pending --> Denied : reviewer denies
+    Pending --> Approved : reviewer approves, role webmaster (Teleport blocks self-review: reviewer != requester)
+
+    Approved --> Executing : Teleport grants InvestigatorBot RBAC to reach this one PlanRunnerBot app (trait-scoped to this request only)
+    note right of Executing
+        InvestigatorBot holds no kube RBAC itself;
+        it relays exec/verify/rollback to PlanRunnerBot,
+        which re-checks Access Request state on every call.
+        Teleport RBAC reachability is the only caller check --
+        PlanRunnerBot does not compare caller identity to User,
+        since User filed the request but InvestigatorBot drives it
+    end note
+
+    Executing --> Executing : step n of m
+    Executing --> Complete : all steps run and verified
+    Executing --> RolledBack : a step failed, rollback run
+
+    Complete --> Resolved : alert cleared, both bots and the beam torn down
+    RolledBack --> Resolved : alert still firing, escalate
+    Denied --> [*]
+    Resolved --> [*]
+```
+
+Two separate mechanisms do the gating, deliberately not one: `plan-runner`'s own check decides whether an
+*approved* request's steps may run right now (re-run on every call — not approved, wrong phase, out of
+order all get refused); Teleport RBAC decides whether the caller can *reach the app* at all. They're
+intentionally not reconciled against each other — `plan-runner` doesn't compare caller identity to the
+request's user, because the request is always filed as `User` (Teleport bots can't file Access Requests)
+while `InvestigatorBot` is what actually drives it. The RBAC grant is what's scoped per request instead:
+Teleport won't let `InvestigatorBot` open a session to any app until the `investigator-executor-access`
+trait names this one specifically, which only happens after approval and only for this one executor's
+beam. Tearing down the investigation (removing the bot) revokes it outright, not just on next renewal.
 
 ## Layout
 
@@ -48,11 +126,11 @@ or type in the tmux tab); the Investigations row says "revision proposed" while 
 | `investigator/` | The investigation agent (pi-agent-core; read-only kubectl tool; `submit_change_request`; HTTP API for the TUI), its in-beam bootstrap, the tmux runner, a mock kubectl for testing without a cluster. |
 | `cli/appproxy.ts` | Pooled `tsh proxy app` connections to published beam apps (the investigator's API). |
 | `plan-runner/` | The executor: MCP over streamable HTTP, approval gate polling the Access Request, phase state machine, command exec, in-beam `bootstrap.sh`. |
-| `investigator/prompt.md` | The investigator's system prompt, in Markdown: how to investigate, the CR format, how to work with the operator. Edit freely; copied into the beam per investigation. |
+| `investigator/prompt.md` | The investigator's system prompt, in Markdown: how to investigate, the change-request format, how to work with the operator. Edit freely; copied into the beam per investigation. |
 | `runbooks/` | Markdown runbooks fed to the investigator by alert name (`{{runbook}}` in the prompt). |
-| `shared/` | CR schema (zod), YAML/argv parsing, tsh/tctl helpers, Alertmanager reader. |
+| `shared/` | Change-request schema (zod), YAML/argv parsing, tsh/tctl helpers, Alertmanager reader. |
 | `terraform/` | Roles (`operator` — also used by investigation bots, `oncall-change`, `webmaster`, `administrator` — also used by the cluster-setup bot), reviewer user, kube-agent join token. |
-| `k8s/`, `demo/` | E-mail Pals deployments (`emailpals-web` served from ConfigMaps of `k8s/emailpals-web/site`, `emailpals-api`), RBAC, alert rule; `kubeup.sh`, `break.sh`, `reset.sh`, `lib-teleport-admin.sh`, `approve.sh`, `bootstrap-beam.sh`; sample alert; local smoke CRs. |
+| `k8s/`, `demo/` | E-mail Pals deployments (`emailpals-web` served from ConfigMaps of `k8s/emailpals-web/site`, `emailpals-api`), RBAC, alert rule; `kubeup.sh`, `break.sh`, `reset.sh`, `lib-teleport-admin.sh`, `approve.sh`, `bootstrap-beam.sh`; sample alert; local smoke change requests. |
 
 ## Setup (once)
 
@@ -82,8 +160,8 @@ npx tsx cli/oncall.ts    # the TUI
 
 In the TUI: select the alert, **i** to investigate (watch live, or attach with the
 printed `tsh beams ssh …` + `tmux attach -t investigate`) → in Investigations, **t** / **c** / **l**
-show the transcript, the draft, or the log; **s** submits: this first registers the executor (beam, per-CR bot, plan-runner
-published as an app) and then files the Access Request whose reason is the CR plus an
+show the transcript, the draft, or the log; **s** submits: this first registers the executor (beam, per-change-request bot, plan-runner
+published as an app) and then files the Access Request whose reason is the change request plus an
 `executor:` block naming that bot, beam and app. The reviewer approves a concrete, registered
 executor: in Change Requests, **a** approves / **d** denies (that tab stands in for a Teleport
 Access Request UI and does nothing else). Back in Investigations, the row now shows an
@@ -111,10 +189,12 @@ reconciles: the intent clears when the request, the bot labels or the executor's
 reflect it, or after a timeout with a warning. On startup intents are dropped and remote state wins.
 
 **The investigator submits, too.** **s** on an investigation asks the agent to submit: `submit_for_approval`
-runs `investigator/submit-cr.sh` inside its beam, which creates the executor beam, the per-change bot and
+runs `investigator/submit-cr.sh` inside its beam, which creates the executor beam, the per-change-request bot and
 one-time token (`tctl` works in a beam with `--identity $TELEPORT_IDENTITY_FILE --auth-server`), ships one
-archive (plan-runner bundle, bootstrap, `cr.yaml`), bootstraps, publishes, files the Access Request with the
-`executor:` block, and labels the bot with the request id, app and `oncall/parent-beam`. The laptop only
+archive (plan-runner bundle, bootstrap, `cr.yaml`), bootstraps, publishes, files the Access Request — as the
+beam's own identity, i.e. the operator (Teleport bots cannot file Access Requests at all, confirmed live:
+"can not request role", independent of what roles they hold) — with the `executor:` block, and labels the bot
+with the request id, app and `oncall/parent-beam`. The laptop only
 watches Teleport: the request and the labeled bot appear on the next refresh and are linked back to the
 investigation by that parent label. The agent then attaches the executor's MCP tools as `executor_*`
 (`connect_executor`), with the server's own schemas; `executor_exec` etc. return an error until approval.
@@ -142,7 +222,7 @@ can be asserted; the TUI marks such steps "verify: no-op" so the reviewer sees i
 more than 30 minutes ago leave the list (`hide_closed_after` in `~/.oncallrc`, 0 keeps everything); **H** shows them again.
 The list badge is the Access Request's own state (PENDING, APPROVED, DENIED); the executor's state is in Investigations.
 
-**Approving from the CR tab.** **a** approves and **d** denies as the human reviewer (`webmaster` by
+**Approving from the Change Requests tab.** **a** approves and **d** denies as the human reviewer (`webmaster` by
 default, `reviewer:` in `~/.oncallrc`) through a second tsh profile (`~/.tsh-reviewer`); you type the
 review reason on the bottom line. The first time, the TUI suspends for the reviewer's `tsh login`
 (password + MFA). One-time setup: `tctl users reset webmaster` prints the link that sets the password.
@@ -152,9 +232,10 @@ review reason on the bottom line. The first time, the TUI suspends for the revie
 on the investigation send one instruction each to the investigator (over its API, like **p**):
 the executor's MCP URL and exactly one operation. The agent calls the executor from inside its beam over
 the beam's app access and narrates the result in its transcript; the TUI polls the executor's `status`
-until it reflects the operation, then re-enables the keys. The executor has four tools, answers only the
-requester (the beam's owner), and refuses anything the state does not allow, so the agent cannot reorder,
-skip, repeat or invent steps. If the investigator's beam is gone, the laptop calls the executor directly
+until it reflects the operation, then re-enables the keys. The executor has four tools and refuses anything
+the state does not allow, so the agent cannot reorder, skip, repeat or invent steps; who may even reach it
+at all is Teleport RBAC's job (the investigation bot's `investigator-executor-access` grant, see Access
+Flow above), not a caller-identity check inside plan-runner. If the investigator's beam is gone, the laptop calls the executor directly
 and the executor block says `driver: laptop (investigator gone)`.
 
 **The investigator is a service.** The agent serves a small HTTP API on its beam, published as a Teleport
@@ -167,13 +248,13 @@ the **n** / **v** / **b** / **r** / **s** instructions; `PUT /draft` is **e**. T
 `tsh proxy app` per investigator (`cli/appproxy.ts`, pooled) and polls the selected one every 5s, others
 while they have work outstanding. No marker parsing, no terminal scraping: the agent's state is the state.
 
-**The draft is a file, and the investigation is a conversation.** The investigator writes the CR to
+**The draft is a file, and the investigation is a conversation.** The investigator writes the change request to
 `/home/beams/investigate/cr.yaml` in its beam and then stays alive; `/state` carries the file, and the
 TUI mirrors it to `~/.oncall/draft-*.yaml`. In Investigations: **p** sends a message to the investigator
 ("check the ConfigMap too", "make step 2 also scale to 2"); its reply streams into the transcript and any
-revised CR replaces the file. **A** attaches to the agent's tmux window, where you can type directly.
+revised change request replaces the file. **A** attaches to the agent's tmux window, where you can type directly.
 **e** opens the draft in your editor (TUI suspended), validates it, and sends it to the agent so it reads
-your version before its next turn. **s** submits the agent's current file; a filed CR is immutable. Preferences live in
+your version before its next turn. **s** submits the agent's current file; a filed change request is immutable. Preferences live in
 `~/.oncallrc` (YAML, see `.oncallrc.example`): `editor`, `attach` (tab | window | terminal | print),
 `proxy`, `kube_cluster`, `refresh_every`, `target`. Environment variables still win.
 
@@ -187,9 +268,9 @@ GONE if its beam vanished. The Access Request's state (PENDING / APPROVED / DENI
 Teleport's. An executor whose investigation row is missing (filed from the CLI, or a lost `~/.oncall`) gets a
 row marked "investigator gone" so it can still be torn down.
 
-**What completes a change request.** The CR carries an `alert:` block (name + Alertmanager
+**What completes a change request.** The change request carries an `alert:` block (name + Alertmanager
 fingerprint) written by the investigator, so the TUI can say whether the alert it answers is
-still firing. A CR is done when the executor reports COMPLETE (every step ran and verified),
+still firing. A change request is done when the executor reports COMPLETE (every step ran and verified),
 the alert has resolved, and the operator tears the investigation down: **x** removes the executor's beam, bot and token,
 which revokes the escalated identity. The Access Request stays as the approval record; the
 bot's actions are the audit record. Teleport itself has no completion state for a request.
@@ -202,14 +283,14 @@ Approval must come from a second identity (self-review is refused, and `tctl req
 needs an `access_request:update` rule that `editor` lacks). Either the reviewer user, in another
 profile: `TELEPORT_HOME=~/.tsh-reviewer tsh --proxy flat-pine.beams.sh:443 request review --approve <id>`
 (one-time `tctl users reset webmaster`), or the demo shortcut `demo/approve.sh [<id>]`: it shows the
-queue with `tctl requests ls`, the request with `tctl requests get` (plus the CR unescaped), asks y/N,
+queue with `tctl requests ls`, the request with `tctl requests get` (plus the change request unescaped), asks y/N,
 then mints a short-lived identity for the Machine ID bot `webmaster-bot` (role `webmaster`) and
 reviews with `tsh request review`. `--deny` denies, `-y` skips the prompt.
 
 **How a beam is set up.** Each beam gets one archive: the files it needs, staged under their target
 paths and extracted at `/home/beams` (`init-<name>.tgz` stays in `~/.oncall` as the record of that initial
 state). For an investigation that is the agent bundle, `prompt.md`, the runbooks, the alert, the scripts
-and your terminfo; for an executor, the plan-runner bundle, its bootstrap and the CR file. Then one script
+and your terminfo; for an executor, the plan-runner bundle, its bootstrap and the change-request file. Then one script
 runs per phase.
 
 **The investigation is a recorded Teleport session.** The agent prints its whole conversation, including
@@ -280,9 +361,13 @@ always loaded (`_kubernetes.md` here), `runbooks/<alert>.md` is the alert's, `_d
 
 ## What plan-runner enforces
 
-- Loads the CR from the Access Request through the bot identity (readable while PENDING). The request must be
+- Loads the change request from the Access Request through the bot identity (readable while PENDING). The request must be
   APPROVED and unexpired for `exec` / `verify` / `rollback` to do anything; re-checked per call and polled every 10s.
-- Caller must be the requester (Teleport JWT `username` claim verified against the proxy JWKS); anyone else gets 403 before MCP.
+- Caller must present a valid Teleport JWT (`username` claim verified against the proxy JWKS) to get past MCP at all, but plan-runner
+  does not additionally check *who* that caller is — the request is filed by the human requester, while the investigation bot is the
+  one that actually drives it, and Teleport bots can't file Access Requests themselves (confirmed live: "can not request role",
+  independent of role grants). Who can even reach this app is Teleport RBAC's job (`investigator-executor-access`, trait-scoped
+  to this one request only — see Access Flow above), not an identity-matching check inside plan-runner.
 - A fixed API of four tools, one step at a time, server-owned cursor: `exec` runs the next pending step (then its verify), once and
   in order; `verify` re-runs the last completed step's verify, repeatable; `rollback` undoes the last completed step, in reverse,
   after a failure or deliberately after COMPLETE; `status` reports phase, steps, the running command, the command log and which
@@ -308,23 +393,29 @@ oncall/app: the published executor app, added after publish
 This mirrors how the beam service labels each beam's own system bot. `tctl get bots` plus
 `tsh beams ls` rebuilds the whole picture; `~/.oncall/` is only a cache, and the TUI,
 `oncall exec-status`, and `oncall teardown` fall back to Teleport when it is missing. Every
-Kubernetes write carries the bot name, so an audit event ties back bot → beam → CR → owner.
+Kubernetes write carries the bot name, so an audit event ties back bot → beam → change request → owner.
 
 ## What the audit log shows for one change request
 
 Everything below is a native Teleport event; **w** in the TUI opens the Web UI audit log searched for the
-executor bot (`/web/cluster/<cluster>/audit?search=administrator-<run>`). In order, for one CR:
+executor bot (`/web/cluster/<cluster>/audit?search=administrator-<run>`). In order, for one change request:
 
 | Event | Who | What it proves |
 |---|---|---|
 | `bot.create` | requester | the on-call minted a dedicated identity `administrator-<run>` for this change |
 | `session.start` / `exec` / `sftp` on node `beam-<uuid>` | requester | every bootstrap command and file (`cr.yaml`, plan-runner bundle) sent to the executor beam; node labels carry the beam alias and owner |
 | `join_token.bound_keypair.recovery`, `bot.join` (bound_keypair, from the beam's IP), `cert.create` roles `[administrator]` | bot | the identity was bound to that beam once and can't be replayed |
-| `access_request.create` (reason = the CR YAML, incl. `executor:` bot/beam/app) | requester | the plan as filed, naming the executor that will run it |
+| `access_request.create` (reason = the change-request YAML, incl. `executor:` bot/beam/app) | requester | the plan as filed, naming the executor that will run it |
 | `access_request.review` state APPROVED | reviewer | who approved, with reason |
-| `app.session.start` app `<beam>-<id4>` | requester | the operator reached the executor (each `exec`/`verify`/`rollback` is a request on this session) |
-| `kube.request` PATCH/GET on the deployment, user `bot-administrator-<run>`, groups `[webmaster]`, response 200 | bot | the change itself, attributed to the per-CR identity, with cluster, path, verb and status |
+| `app.session.start` app `<beam>-<id4>` | investigation bot | the investigator reached the executor, granted by Teleport RBAC post-approval (each `exec`/`verify`/`rollback` is a request on this session) |
+| `kube.request` PATCH/GET on the deployment, user `bot-administrator-<run>`, groups `[webmaster]`, response 200 | bot | the change itself, attributed to the per-change-request identity, with cluster, path, verb and status |
 | `bot.delete` | requester | close: the identity is gone |
+
+"Requester" is the operator — Access Requests are always filed as the beam's own (human-equivalent)
+identity, since Teleport bots cannot file Access Requests at all. The `app.session.start` for `exec` /
+`verify` / `rollback` is still the investigation bot, not the requester: that's expected, and plan-runner
+no longer compares the two (see "What plan-runner enforces" below) — Teleport RBAC decides who can reach
+the app at all.
 
 Investigations leave the same shape with `cr-inv-*` bots, `kube.request` GETs only, and an
 `app.session.start` for the `anthropic` LLM app made by the beam.
@@ -341,7 +432,11 @@ Gaps observed (18.11):
   and params), so `exec {step}` would be audited by name. It is not usable here for the *server* side:
   `tsh beams publish` only registers HTTP apps, and an App Service elsewhere cannot reach a process inside
   a beam (`mcp+http://` needs a routable URI). The often-quoted "MCP doesn't work in beams" is the *client*
-  side (`tsh mcp connect` needs a cert reissue), which does not apply here because the caller is the laptop.
+  side (`tsh mcp connect` needs a cert reissue) — this *does* apply here, since the caller is the
+  investigator (a bot inside a beam), not the laptop: a bare, unauthenticated request to the executor's
+  public app URL gets redirected to Teleport's own login page rather than reaching plan-runner. The
+  investigator tunnels through `tsh proxy app` under its own bot identity instead (that identity can
+  reissue the app-scoped cert; the beam's own native identity cannot).
 - HTTP app sessions record `start`/`chunk` only, and app session recordings could not be streamed back on
   this tenant.
 - Nothing links `kube.request` by the bot to the Access Request except the bot name in the request's
@@ -354,7 +449,7 @@ Gaps observed (18.11):
   beam, the workaround the Beams team recommends. Delegation V2 (core#536, RFD 0329) is the native path.
 - MCP-subkind apps are unreachable from beams today; plan-runner is a plain HTTP app serving MCP over HTTPS.
 - Writes are attributed to `bot-administrator-<id8>`, correlated to you by name and by the request id in plan-runner's log.
-- Access Requests have no completion state; the CR's progress lives in plan-runner (and `~/.oncall/`). Done = executor torn down.
+- Access Requests have no completion state; the change request's progress lives in plan-runner (and `~/.oncall/`). Done = executor torn down.
 - Alertmanager is read through the Kubernetes API server's service proxy. In Teleport's v8 `kubernetes_resources`
   that path is a distinct verb: `{kind: services, api_group: "", verbs: [get, proxy]}`; plain `get/list/watch` on `*` does not cover it.
 - Long-running executor steps (e.g. `rollout status --timeout=90s`) exceed the MCP SDK's default 60s client timeout; the CLI/TUI use 15 minutes.

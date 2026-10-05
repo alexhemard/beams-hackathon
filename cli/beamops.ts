@@ -41,25 +41,6 @@ export function ambientEnv(): NodeJS.ProcessEnv {
   return e;
 }
 
-/**
- * `tsh proxy app` (used by `cli/appproxy.ts` to reach the investigator/executor APIs) needs to
- * reissue an app-scoped cert — something the beam's own delegated identity (`BEAM_IDENTITY_FILE`,
- * used by `ambientEnv()` for beam/bot control-plane calls) can never do, by platform design
- * (`disallow-reissue`). The `oncall-bot` Machine ID bot `beaminit.sh` provisions in every beam
- * *can* reissue, and the investigator/executor owner checks trust its username
- * (`shared/teleport.ts`'s `TRUSTED_BOT_USERNAME`) as a stand-in for the human owner. Point at it
- * here instead of the native identity. Guarded by existsSync so plain laptop usage (full `tsh
- * login` session, no beam-specific identity files at all) is unaffected.
- */
-const BOT_IDENTITY_FILE = join(homedir(), "bot-id", "identity");
-
-export function botAppEnv(): NodeJS.ProcessEnv {
-  const e = { ...process.env };
-  if (existsSync(BOT_IDENTITY_FILE)) e.TELEPORT_IDENTITY_FILE = BOT_IDENTITY_FILE;
-  else delete e.TELEPORT_IDENTITY_FILE;
-  return e;
-}
-
 export type BotRole = "executor" | "investigator";
 
 export interface BotLabels {
@@ -114,6 +95,24 @@ export async function addBotLabels(name: string, extra: Record<string, string>):
   if (!bot) throw new Error(`bot ${name} not found`);
   bot.metadata.labels = { ...(bot.metadata.labels ?? {}), ...extra };
   const file = join(stateDir(), `bot-${name}.json`);
+  writeFileSync(file, JSON.stringify(bot), { mode: 0o600 });
+  await runOk(["tctl", "create", "--force", "-f", file, "--auth-server", PROXY], { echo: false, env: ambientEnv() });
+}
+
+/**
+ * Set (replacing) a single trait on an existing bot, e.g. so a role's `app_labels` can template on
+ * it (`{{internal.<traitName>}}` -- terraform/roles.tf's `investigator-executor-access`). Takes
+ * effect on the bot's next cert renewal, not instantly -- tbot re-reads the bot resource's current
+ * traits on every renewal, so no forced reissue is needed.
+ */
+export async function setBotTrait(name: string, traitName: string, value: string): Promise<void> {
+  const bots = await runJson<any[]>(["tctl", "get", `bot/${name}`, "--format", "json", "--auth-server", PROXY], { echo: false, env: ambientEnv() });
+  const bot = bots[0];
+  if (!bot) throw new Error(`bot ${name} not found`);
+  const traits = (bot.spec.traits ?? []).filter((t: { name: string }) => t.name !== traitName);
+  traits.push({ name: traitName, values: [value] });
+  bot.spec.traits = traits;
+  const file = join(stateDir(), `bot-${name}-traits.json`);
   writeFileSync(file, JSON.stringify(bot), { mode: 0o600 });
   await runOk(["tctl", "create", "--force", "-f", file, "--auth-server", PROXY], { echo: false, env: ambientEnv() });
 }

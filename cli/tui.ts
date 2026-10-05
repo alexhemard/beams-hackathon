@@ -17,7 +17,7 @@ import { Key, ProcessTerminal, TuiAltScreen, decodeKittyPrintable, isKeyRelease,
 import { alertTitle, expireSilence, fetchAlerts, fetchSilences, silenceAlert, silencedBy, type Alert, type Silence } from "../shared/alerts";
 import { setEchoSink, type AccessRequest } from "../shared/teleport";
 import { isAsserting, parseCR, type CR } from "../shared/cr";
-import { PROXY, currentUser, listBeams, removeBeam, removeBot, stateDir } from "./beamops";
+import { PROXY, currentUser, listBeams, removeBeam, removeBot, setBotTrait, stateDir } from "./beamops";
 import { investigate } from "./investigate";
 import { appProxy, closeAppProxies, dropAppProxy } from "./appproxy";
 import { callOperation, discover, executorStatus, listCRs, loadState, recoverExecutors, submit, teardown, type ExecutorStatus, type Operation } from "./ops";
@@ -63,6 +63,8 @@ interface Investigation {
   proposalPending?: boolean;
   /** local intent not yet reflected by remote state; cleared by reconcile() (or dropped at boot) */
   pending?: Pending;
+  /** app-access grant to this investigation's own bot, made once its CR is approved (fetchLive()) */
+  mcpGrant?: { beam: string; ok: boolean; error?: string };
 }
 
 type Via = "investigator" | "laptop";
@@ -380,6 +382,18 @@ export async function startTui(o: TuiOptions): Promise<void> {
       sub("state", `${st.color(st.label)}${st.detail ? DIM(` · ${st.detail}`) : ""}${!live && liveInflight.has(c.req.id) ? DIM(" …") : ""}`),
       sub("request", `${c.req.id.slice(0, 8)} ${stateColor(c.req.state)}`),
       c.executor?.beam || c.executor?.bot ? sub("beam", `${c.executor.beam ?? DIM("gone")}${c.executor.bot ? `  bot ${c.executor.bot}` : ""}${c.executor.appName ? `  app ${c.executor.appName}` : ""}`) : undefined,
+      hasInvestigator(inv)
+        ? sub(
+            "mcp access",
+            inv.mcpGrant && inv.mcpGrant.beam === c.executor?.beam
+              ? inv.mcpGrant.ok
+                ? GREEN(`granted · ${inv.bot} → ${inv.mcpGrant.beam}`)
+                : RED(`grant failed: ${inv.mcpGrant.error}`)
+              : live?.approved
+                ? YELLOW("granting…")
+                : DIM("waiting for approval"),
+          )
+        : undefined,
       live?.approved && executorOpen(c) ? sub("driver", hasInvestigator(inv) ? `investigator ${inv.beam}` : YELLOW("laptop (investigator gone)")) : undefined,
       live?.inflight ? sub("running", YELLOW(`${live.inflight.op} ${live.inflight.step}.${live.inflight.kind} since ${live.inflight.since.slice(11, 19)}Z`)) : undefined,
       inv.pending?.kind === "op" && !live?.inflight ? sub("pending", YELLOW(`${inv.pending.op} → ${inv.pending.via} at ${hhmmss(new Date(inv.pending.at))}`)) : undefined,
@@ -991,6 +1005,23 @@ export async function startTui(o: TuiOptions): Promise<void> {
       }
       if (s.inflight && !c.live?.inflight) pushLog(`${DIM(c.executor?.bot ?? c.req.id.slice(0, 8))} ${YELLOW(`running ${s.inflight.step}.${s.inflight.kind}`)}`, who);
       if (c.live && s.phase !== c.live.phase) pushLog(`${DIM(c.executor?.bot ?? c.req.id.slice(0, 8))} phase ${c.live.phase} → ${BOLD(s.phase)}`, who);
+      if (s.approved && !c.live?.approved) {
+        const inv = investigations.find((v) => v.requestId === c.req.id);
+        if (inv?.bot && c.executor?.beam) {
+          const bot = inv.bot, beam = c.executor.beam;
+          void setBotTrait(bot, "executor_beam_alias", beam)
+            .then(() => {
+              inv.mcpGrant = { beam, ok: true };
+              saveInv();
+              pushLog(DIM(`${bot}: granted app access to executor beam ${beam} (takes effect on its next cert renewal)`), who);
+            })
+            .catch((e) => {
+              inv.mcpGrant = { beam, ok: false, error: (e as Error).message };
+              saveInv();
+              pushLog(YELLOW(`${bot}: granting executor app access failed: ${(e as Error).message}`), who);
+            });
+        }
+      }
       c.live = s;
       c.liveAt = Date.now();
       c.executor = { ...c.executor, phase: s.phase };
@@ -1465,7 +1496,8 @@ function noteText(s: string): string {
   return s;
 }
 function crLabel(inv: Investigation): string {
-  return !inv.crYaml || inv.requestId ? "change request" : inv.draftRev && inv.draftRev > 1 ? `draft rev ${inv.draftRev}` : "draft";
+  if (!inv.crYaml || inv.requestId) return "change request";
+  return inv.draftRev && inv.draftRev > 1 ? `change request (draft rev ${inv.draftRev})` : "change request (draft)";
 }
 function stateColor(st: string): string {
   return st === "APPROVED" ? GREEN(st) : st === "DENIED" ? RED(st) : YELLOW(st);

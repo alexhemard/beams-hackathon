@@ -10,7 +10,14 @@
 #   3. tar.gz {plan-runner.mjs, bootstrap.sh, cr.yaml} → scp → extract   reproducible init state
 #   4. tsh beams exec bootstrap.sh            tbot joins as the bot, plan-runner starts (status only until approved)
 #   5. tsh beams publish                      the executor's MCP endpoint as a Teleport app
-#   6. tsh request create                     reason = CR + executor block naming bot/beam/app
+#   6. tsh request create                     reason = CR + executor block naming bot/beam/app. Filed as the
+#                                              beam's own (human-equivalent) identity, not the investigation
+#                                              bot: Teleport bots cannot file Access Requests at all, confirmed
+#                                              live ("can not request role", independent of role grants). The
+#                                              investigator later drives this executor as itself regardless --
+#                                              plan-runner no longer compares caller identity to the requester;
+#                                              Teleport RBAC (investigator-executor-access, terraform/roles.tf)
+#                                              is what actually restricts who can reach the app.
 #   7. tctl: label the bot with the request id and app
 # Prints one JSON line on stdout: {requestId, beam, bot, app, appUrl, mcpUrl}. Progress goes to stderr.
 set -euo pipefail

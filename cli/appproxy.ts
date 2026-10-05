@@ -2,7 +2,7 @@
 // caller's JWT on every request, so the app sees who is calling. Pooled by app name, LRU-evicted.
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { PROXY, botAppEnv } from "./beamops";
+import { PROXY, ambientEnv } from "./beamops";
 import { freePort, portOpen } from "./ops";
 import { retryWithBackoff } from "./retry";
 
@@ -37,7 +37,7 @@ export class AppProxy {
   /** One spawn-and-wait attempt. Resolves with undefined once the local port is up, or an error message. */
   private attempt(deadline: number): Promise<string | undefined> {
     return new Promise((resolve) => {
-      const child = spawn("tsh", ["--proxy", PROXY, "proxy", "app", this.app, "--port", String(this.port)], { stdio: ["ignore", "pipe", "pipe"], env: botAppEnv() });
+      const child = spawn("tsh", ["--proxy", PROXY, "proxy", "app", this.app, "--port", String(this.port)], { stdio: ["ignore", "pipe", "pipe"], env: ambientEnv() });
       this.child = child;
       let err = "";
       let exited = false;
@@ -90,7 +90,10 @@ export class AppProxy {
           } catch {
             data = { raw: text };
           }
-          if (!res.ok) return `${this.app}${path}: ${res.status} ${data?.error ?? text.slice(0, 200)}`; // a real response, not transient
+          // 502/503/504 is the proxy saying it couldn't reach the app's backend yet (freshly
+          // published/granted, routing still propagating) -- transient, unlike a real 4xx/other 5xx
+          // from the app itself, which means exactly what it says and isn't retried.
+          if (!res.ok) return `${this.app}${path}: ${res.status} ${data?.error ?? text.slice(0, 200)}`;
           result = data as T;
           return undefined;
         } catch (e) {
@@ -101,7 +104,7 @@ export class AppProxy {
         }
       },
       deadline,
-      (err) => /timed out after|ECONNRESET|ECONNREFUSED|fetch failed|socket hang up/i.test(err),
+      (err) => /timed out after|ECONNRESET|ECONNREFUSED|fetch failed|socket hang up|: 50[234]\b/i.test(err),
     );
     return result as T;
   }

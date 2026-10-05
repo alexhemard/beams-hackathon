@@ -18,9 +18,10 @@
 import { parseArgs } from "node:util";
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer as createNetServer, connect as netConnect } from "node:net";
 import { CallerVerifier, InsecureHeaderVerifier } from "../plan-runner/identity";
 import { Agent, type AgentTool, type AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
@@ -28,7 +29,6 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { Type, type Model, type Api } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { CRSchema, parseCR, serializeCR, validateChangeSemantics, validateCommands, verifyNotes, toArgv, type CR } from "../shared/cr";
-import { TRUSTED_BOT_USERNAME } from "../shared/teleport";
 import bundledPrompt from "./prompt.md"; // fallback copy baked into the bundle at build time
 
 const { values: args } = parseArgs({
@@ -304,14 +304,68 @@ const concludeTool: AgentTool<any> = {
 let executorUrl: string | undefined;
 const EXECUTOR_URL = /^https:\/\/[a-z0-9.-]+\/mcp$/i;
 
+// The executor's public URL is Teleport-app-access-gated (an unauthenticated request there gets a
+// 302 to the Web UI's login-launch page, not the backend), so a bare fetch never reaches it. Tunnel
+// through `tsh proxy app` under this investigation's own bot identity instead -- unlike the beam's
+// native delegated identity, a Machine ID bot identity can reissue the app-scoped cert this needs.
+// One pooled tunnel at a time (there's only ever one executor per investigation at once).
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createNetServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const port = (srv.address() as { port: number }).port;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+function portOpen(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = netConnect({ port, host: "127.0.0.1" });
+    sock.once("connect", () => { sock.destroy(); resolve(true); });
+    sock.once("error", () => resolve(false));
+  });
+}
+let executorProxy: { app: string; port: number; child: ChildProcess } | undefined;
+async function executorProxyPort(app: string): Promise<number> {
+  if (executorProxy?.app === app) return executorProxy.port;
+  if (executorProxy) { executorProxy.child.kill("SIGTERM"); executorProxy = undefined; }
+  const port = await freePort();
+  const child = spawn("tsh", ["--proxy", self.proxy ?? "flat-pine.beams.sh:443", "proxy", "app", app, "--port", String(port), "--identity", args.identity!], { stdio: ["ignore", "pipe", "pipe"] });
+  let err = "";
+  child.stderr!.on("data", (d) => (err += d.toString()));
+  const deadline = Date.now() + 20_000;
+  try {
+    for (;;) {
+      if (await portOpen(port)) break;
+      if (Date.now() > deadline) throw new Error(`tsh proxy app ${app} did not come up: ${err.trim().split("\n").pop() ?? ""}`);
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  } catch (e) {
+    child.kill("SIGTERM");
+    throw e;
+  }
+  executorProxy = { app, port, child };
+  return port;
+}
+
 async function callExecutor(op: "status" | "exec" | "verify" | "rollback", params: { url?: string; expect?: string } = {}): Promise<AgentToolResult<any>> {
   if (params.url && EXECUTOR_URL.test(params.url)) executorUrl = params.url;
   if (!executorUrl) return { content: [{ type: "text", text: "no executor known yet: submit_for_approval registers one, or pass the URL the operator gave you (https://<app>.<proxy>/mcp)" }], details: { error: true } };
+  if (!args.identity) return { content: [{ type: "text", text: "executor access needs this investigation's own bot identity (none configured)." }], details: { error: true } };
+  const url = new URL(executorUrl);
+  const app = url.hostname.split(".")[0];
+  let port: number;
+  try {
+    port = await executorProxyPort(app);
+  } catch (e) {
+    return { content: [{ type: "text", text: `could not reach executor app ${app}: ${(e as Error).message}` }], details: { error: true } };
+  }
   const client = new McpClient({ name: "investigator", version: "0.1.0" });
   try {
-    await client.connect(new StreamableHTTPClientTransport(new URL(executorUrl)));
-    const args = op === "status" ? {} : { confirm: true, ...(params.expect ? { expect: params.expect } : {}) };
-    const r = await client.callTool({ name: op, arguments: args }, undefined, { timeout: 15 * 60_000 });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}${url.pathname}`)));
+    const args_ = op === "status" ? {} : { confirm: true, ...(params.expect ? { expect: params.expect } : {}) };
+    const r = await client.callTool({ name: op, arguments: args_ }, undefined, { timeout: 15 * 60_000 });
     const text = ((r as any).content ?? []).map((c: any) => c.text ?? "").join("\n");
     return { content: [{ type: "text", text: text || "(no output)" }], details: { op, isError: (r as any).isError === true } };
   } catch (e) {
@@ -512,8 +566,7 @@ const http = createServer(async (req: IncomingMessage, res: ServerResponse) => {
   try {
     const header = args["insecure-caller"] || !proxyHost ? req.headers["x-debug-caller"] : req.headers["teleport-jwt-assertion"];
     const caller = await verifier.verify(Array.isArray(header) ? header[0] : header);
-    if (self.owner && caller.username !== self.owner && caller.username !== TRUSTED_BOT_USERNAME)
-      return json(res, 403, { error: `only ${self.owner} may drive this investigation` });
+    if (self.owner && caller.username !== self.owner) return json(res, 403, { error: `only ${self.owner} may drive this investigation` });
   } catch (e) {
     return json(res, 401, { error: (e as Error).message });
   }

@@ -9,7 +9,9 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { PROXY, REPO, addBotLabels, ambientEnv, beamExec, beamExecArgv, beamExecOk, beamInit, beamScp, beamScpFrom, bundle, createBeam, createBoundKeypairToken, currentUser, ensureBot, publishedAppName, removeBeam, removeBot, stateDir, step, type BotLabels } from "./beamops";
 import { echo, runOk } from "../shared/teleport";
 
-const INVESTIGATOR_ROLE = process.env.CR_INVESTIGATOR_ROLE ?? "operator";
+// investigator-executor-access is templated on the executor_beam_alias trait (terraform/roles.tf),
+// which cli/tui.ts's fetchLive() only sets once a human approves the CR -- not a static grant.
+const INVESTIGATOR_ROLE = process.env.CR_INVESTIGATOR_ROLE ?? "operator, investigator-executor-access";
 const KUBE_CLUSTER = process.env.CR_KUBE_CLUSTER ?? "emailpals-production";
 
 export interface InvestigateOptions {

@@ -40,7 +40,13 @@ if [ ! -f "$BOT_ID/identity" ]; then
     --join-method=bound_keypair --storage="$STORAGE" --destination="$BOT_ID" --oneshot
 fi
 
-echo "== tbot: kubeconfig for $KUBE_CLUSTER =="
+echo "== tbot: identity (renewable) + kubeconfig for $KUBE_CLUSTER =="
+# The one-shot join above (--oneshot) produces a disallow-reissue identity at $BOT_ID -- fine for a
+# single join, but it never renews, so it can never request a role or reissue an app-scoped cert
+# later (confirmed live: "can not request role oncall-change" from a cert that otherwise correctly
+# held `operator`). The continuous tbot process below re-renders that same destination with
+# allow_reissue: true, exactly like plan-runner/bootstrap.sh already does for the executor bot --
+# same mechanism, same reason.
 cat > "$HOME_DIR/tbot.yaml" <<EOF
 version: v2
 proxy_server: $PROXY
@@ -51,6 +57,11 @@ storage:
   type: directory
   path: $STORAGE
 services:
+  - type: identity
+    allow_reissue: true
+    destination:
+      type: directory
+      path: $BOT_ID
   - type: kubernetes/v2
     selectors:
       - name: $KUBE_CLUSTER

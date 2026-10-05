@@ -21,7 +21,7 @@ import { parseCR, serializeCR, validateChangeSemantics, validateCommands, STATUS
 import { getRequest, listRequests, run, runOk, type AccessRequest } from "../shared/teleport";
 import { retryWithBackoff } from "./retry";
 import {
-  PROXY, REPO, addBotLabels, ambientEnv, botAppEnv, beamExec, beamExecOk, beamInit, beamScp, bundle, createBeam, createBoundKeypairToken, currentUser, discover,
+  PROXY, REPO, addBotLabels, ambientEnv, beamExec, beamExecOk, beamInit, beamScp, bundle, createBeam, createBoundKeypairToken, currentUser, discover,
   ensureBot, listBeams, publishedAppName, removeBeam, removeBot, stateDir, step as stepLog, type BotLabels, type TrackedBot,
  beamScpFrom } from "./beamops";
 
@@ -180,7 +180,7 @@ export async function withExecutor<T>(id: string, emit: Emit, o: RunOptions, fn:
     // fast with "not found" until it does, so retry that specific failure within the deadline.
     const attempt = (): Promise<string | undefined> =>
       new Promise((resolve) => {
-        const p = spawn("tsh", ["--proxy", PROXY, "proxy", "app", appName, "--port", String(port)], { stdio: ["ignore", "pipe", "pipe"], env: botAppEnv() });
+        const p = spawn("tsh", ["--proxy", PROXY, "proxy", "app", appName, "--port", String(port)], { stdio: ["ignore", "pipe", "pipe"], env: ambientEnv() });
         proxy = p;
         let err = "";
         let exited = false;
@@ -210,12 +210,34 @@ export async function withExecutor<T>(id: string, emit: Emit, o: RunOptions, fn:
     mcpUrl = new URL(`http://127.0.0.1:${port}/mcp`);
   }
   try {
-    const client = new Client({ name: "oncall", version: "0.1.0" });
-    await client.connect(new StreamableHTTPClientTransport(mcpUrl, { requestInit: { headers } }));
+    // The tunnel being up doesn't mean the app is fully reachable end to end yet -- a just-granted
+    // or freshly-published app's first request can 502 while routing propagates (same cold-start
+    // shape as the retry already added to cli/appproxy.ts's AppProxy.fetch). connect() just does the
+    // MCP initialize handshake, no side effects, so it's safe to retry; the actual tool calls in
+    // `fn` below are not retried, to avoid double-executing a real exec/verify/rollback. A fresh
+    // Client per attempt, since the SDK's connect() sets its transport before awaiting the
+    // handshake and never clears it on failure -- retrying connect() on the same Client throws
+    // "Already connected" instead of actually retrying.
+    let client: Client;
+    await retryWithBackoff(
+      async () => {
+        const c = new Client({ name: "oncall", version: "0.1.0" });
+        try {
+          await c.connect(new StreamableHTTPClientTransport(mcpUrl, { requestInit: { headers } }));
+          client = c;
+          return undefined;
+        } catch (e) {
+          await c.close().catch(() => {});
+          return (e as Error).message;
+        }
+      },
+      Date.now() + 20_000,
+      (err) => /bad gateway|502|ECONNRESET|ECONNREFUSED|fetch failed|socket hang up|timed? ?out/i.test(err),
+    );
     try {
-      return await fn(client);
+      return await fn(client!);
     } finally {
-      await client.close().catch(() => {});
+      await client!.close().catch(() => {});
     }
   } finally {
     proxy?.kill();

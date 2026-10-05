@@ -20,7 +20,6 @@ import { CallerVerifier, InsecureHeaderVerifier, type Caller } from "./identity"
 import { execCommand } from "./exec";
 import { CRState, toolName, type Operation } from "./state";
 import { STATUS_TOOL } from "../shared/cr";
-import { TRUSTED_BOT_USERNAME } from "../shared/teleport";
 
 const { values: args } = parseArgs({
   options: {
@@ -156,9 +155,13 @@ async function runOperation(op: Operation, caller: Caller | undefined, expect?: 
   } catch (e) {
     return deny(`not approved: ${(e as Error).message}`);
   }
-  if (caller.username !== approval.request.user && caller.username !== TRUSTED_BOT_USERNAME) {
-    return deny(`caller ${caller.username} is not the requester ${approval.request.user}`);
-  }
+  // No caller-identity check here: Teleport bots can't file Access Requests (confirmed live --
+  // "can not request role", independent of role grants), so the request is filed as the human
+  // requester while the actual caller is the investigation bot driving it on their behalf. The
+  // real gate is Teleport RBAC itself -- investigator-executor-access's app_labels, templated on
+  // a trait only set after approval, decides who can even open a session to this app at all
+  // (terraform/roles.tf, cli/tui.ts's fetchLive()). caller.username is still recorded below for
+  // the audit trail, just not compared against the requester.
   if (inflight) return deny(`${inflight.op} of step ${inflight.step} (${inflight.kind}) is still running since ${inflight.since}; one operation at a time`);
   const cmds = state.plan(op);
   if (cmds.length === 0) return deny(`${op} is not valid in phase ${state.phase} (valid now: ${state.availableOperations().join(", ") || "none"})`);
@@ -254,10 +257,9 @@ const http = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     log("audit", "rejected request", { reason: (e as Error).message });
     return json(res, 401, { error: (e as Error).message });
   }
-  if (caller.username !== requester && caller.username !== TRUSTED_BOT_USERNAME) {
-    log("audit", "rejected non-requester", { caller: caller.username, requester });
-    return json(res, 403, { error: `only the requester (${requester}) may drive this change request` });
-  }
+  // No caller-vs-requester check here either, for the same reason as runOperation() above:
+  // Teleport RBAC (investigator-executor-access) is what actually restricts who can reach this
+  // app at all; requester is still used to discover this executor's own Access Request.
 
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
   let sess = sessionId ? sessions.get(sessionId) : undefined;

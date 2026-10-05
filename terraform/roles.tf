@@ -1,24 +1,27 @@
 # Roles for the change-request MVP.
 #
-#   oncall-change    approval carrier. The CR is an Access Request for this role.
+#   oncall-change    approval carrier. The change request is an Access Request for this role.
 #                    Nothing consumes it as a role; plan-runner checks for an APPROVED
 #                    request naming it. Empty allow on purpose.
-#   operator         attach to the requester (you). Lets you file CRs. Also the
-#                    role for per-investigation bots inside a beam — identical
-#                    read-only kube access, so there's no separate role for it.
-#   webmaster        attach to the reviewer user. Lets them approve CRs.
+#   operator         attach to the human operator and to every investigation bot. Lets
+#                    either file change requests; the bot's grant is what lets it file
+#                    one as itself (see investigator-executor-access below). Also the
+#                    role for per-investigation bots' read-only kube access, so there's
+#                    no separate role for it.
+#   webmaster        attach to the reviewer user. Lets them approve change requests.
 #   administrator    bot role. Full cluster-admin kube access. Two kinds of bot
-#                    hold it, never standing: one `administrator-<id8>` per CR,
-#                    created by the `cr` CLI with a one-time bound-keypair token
-#                    (runs inside the executor beam and performs the change), and
-#                    the short-lived `cluster-setup-*` bot demo/lib-teleport-admin.sh
-#                    mints for demo/kubeup.sh, break.sh, reset.sh. Deliberately one
-#                    role, not namespace-scoped: on a demo cluster the approval gate
-#                    (second reviewer, Access Request) and plan-runner's own argv
-#                    checks (only kubectl, only the approved steps, one at a time)
-#                    are what actually bound an approved CR — not this RBAC scope,
-#                    which was a defense-in-depth layer worth trading for simplicity
-#                    here. Don't make this call the same way for a real cluster.
+#                    hold it, never standing: one `administrator-<id8>` per change
+#                    request, created by `investigator/submit-cr.sh` with a one-time
+#                    bound-keypair token (runs inside the executor beam and performs
+#                    the change), and the short-lived `cluster-setup-*` bot
+#                    demo/lib-teleport-admin.sh mints for demo/kubeup.sh, break.sh,
+#                    reset.sh. Deliberately one role, not namespace-scoped: on a demo
+#                    cluster the approval gate (second reviewer, Access Request) and
+#                    plan-runner's own argv checks (only kubectl, only the approved
+#                    steps, one at a time) are what actually bound an approved change
+#                    request — not this RBAC scope, which was a defense-in-depth layer
+#                    worth trading for simplicity here. Don't make this call the same
+#                    way for a real cluster.
 
 resource "teleport_role" "oncall_change" {
   version = "v8"
@@ -46,15 +49,6 @@ resource "teleport_role" "operator" {
         max_duration        = var.request_max_duration
         suggested_reviewers = [var.reviewer_user]
       }
-      # Lets a bot holding this role (the per-beam `oncall-bot`, and per-investigation bots) open
-      # app sessions — needed to reissue the app-scoped cert `tsh proxy app` uses to reach the
-      # investigator/executor APIs from inside a beam, whose own delegated identity can never
-      # reissue. Scoped to apps Beams published for this user (not a wildcard — bot-side
-      # Access-Request elevation to narrow this further isn't available until Delegation V2,
-      # core#536, ships; see PLAN.md). The investigator's/executor's own owner-only caller check
-      # (investigator/agent.ts, plan-runner/server.ts) and plan-runner's APPROVED-request gate on
-      # every operation are the real security boundary — this is just reachability.
-      app_labels        = { "teleport.internal/beams/owner" = [var.requester_user] }
       kubernetes_labels = var.kube_labels
       kubernetes_groups = [var.kube_view_group]
       kubernetes_resources = [
@@ -82,6 +76,29 @@ resource "teleport_role" "operator" {
         # query, not create/persist one.
         resources = ["audit_query"]
         verbs     = ["use"]
+      }]
+    }
+  }
+}
+
+resource "teleport_role" "investigator_executor_access" {
+  version = "v8"
+  metadata = {
+    name        = "investigator-executor-access"
+    description = "Lets an investigation bot reach the one executor app for the change request it filed. Scoped by the executor_beam_alias trait, which cli/tui.ts's fetchLive() sets on the bot only after a human approves the request -- not a static grant. Kept separate from operator (shared by the human, oncall-bot, and every investigator bot) so this trait-templated rule only ever applies to bots deliberately given it."
+    labels      = { "teleport.dev/creator" = var.teleport_creator }
+  }
+  spec = {
+    allow = {
+      app_labels = { "teleport.internal/beams/alias" = ["{{internal.executor_beam_alias}}"] }
+      # Confirmed live: issuing an app-scoped cert for a role whose app_labels uses trait
+      # templating ({{internal.X}}) fails with "access denied to perform action read on role"
+      # without this -- Teleport needs to read the role definition to resolve the template at
+      # cert-issuance time. Reading role *definitions* only (RBAC policy text), not a resource
+      # access grant.
+      rules = [{
+        resources = ["role"]
+        verbs     = ["read"]
       }]
     }
   }
@@ -116,7 +133,7 @@ resource "teleport_role" "administrator" {
   version = "v8"
   metadata = {
     name        = "administrator"
-    description = "Bot role for per-CR executor bots, and for the short-lived cluster-setup bot (demo/lib-teleport-admin.sh). Full cluster-admin Kubernetes access, plus read access to Access Requests so plan-runner can verify approval."
+    description = "Bot role for per-change-request executor bots, and for the short-lived cluster-setup bot (demo/lib-teleport-admin.sh). Full cluster-admin Kubernetes access, plus read access to Access Requests so plan-runner can verify approval."
     labels      = { "teleport.dev/creator" = var.teleport_creator }
   }
   spec = {
